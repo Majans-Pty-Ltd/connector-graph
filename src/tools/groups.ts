@@ -22,7 +22,7 @@ export function registerGroupTools(server: McpServer, client: GraphClient): void
         if (filter) params.$filter = filter;
 
         if (all_pages) {
-          const groups = await client.getAll<GraphGroup>("/groups", params);
+          const groups = await client.getAll<GraphGroup>("groups", params);
           return {
             content: [
               {
@@ -33,7 +33,7 @@ export function registerGroupTools(server: McpServer, client: GraphClient): void
           };
         }
 
-        const result = await client.get<ODataResponse<GraphGroup>>("/groups", params);
+        const result = await client.get<ODataResponse<GraphGroup>>("groups", params);
         return {
           content: [
             {
@@ -73,7 +73,7 @@ export function registerGroupTools(server: McpServer, client: GraphClient): void
           $select: "id,displayName,userPrincipalName",
         };
         const result = await client.get<ODataResponse<GraphDirectoryObject>>(
-          `/groups/${group_id}/members`,
+          `groups/${group_id}/members`,
           params
         );
         return {
@@ -106,7 +106,7 @@ export function registerGroupTools(server: McpServer, client: GraphClient): void
     },
     async ({ group_id, user_id }) => {
       try {
-        await client.post(`/groups/${group_id}/members/$ref`, {
+        await client.post(`groups/${group_id}/members/$ref`, {
           "@odata.id": `https://graph.microsoft.com/v1.0/directoryObjects/${user_id}`,
         });
         return {
@@ -132,7 +132,7 @@ export function registerGroupTools(server: McpServer, client: GraphClient): void
     },
     async ({ group_id, user_id }) => {
       try {
-        await client.delete(`/groups/${group_id}/members/${user_id}/$ref`);
+        await client.delete(`groups/${group_id}/members/${user_id}/$ref`);
         return {
           content: [
             { type: "text" as const, text: `User ${user_id} removed from group ${group_id}.` },

@@ -27,7 +27,7 @@ async function main(): Promise<void> {
       try {
         // Quick test: list organization
         const result = await client.get<{ value: Array<{ displayName: string; id: string }> }>(
-          "/organization",
+          "organization",
           { $select: "displayName,id" }
         );
         const org = result.value[0];

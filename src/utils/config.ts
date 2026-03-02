@@ -10,7 +10,7 @@ config({ path: resolve(projectRoot, ".env") });
 export const GRAPH_TENANT_ID = process.env.GRAPH_TENANT_ID ?? "";
 export const GRAPH_CLIENT_ID = process.env.GRAPH_CLIENT_ID ?? "";
 export const GRAPH_CLIENT_SECRET = process.env.GRAPH_CLIENT_SECRET ?? "";
-export const GRAPH_API_BASE = "https://graph.microsoft.com/v1.0";
+export const GRAPH_API_BASE = "https://graph.microsoft.com/v1.0/";
 
 export function validateConfig(): void {
   if (!GRAPH_TENANT_ID) {

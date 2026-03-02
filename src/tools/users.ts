@@ -27,7 +27,7 @@ export function registerUserTools(server: McpServer, client: GraphClient): void 
         if (orderby) params.$orderby = orderby;
 
         if (all_pages) {
-          const users = await client.getAll<GraphUser>("/users", params);
+          const users = await client.getAll<GraphUser>("users", params);
           return {
             content: [
               {
@@ -38,7 +38,7 @@ export function registerUserTools(server: McpServer, client: GraphClient): void 
           };
         }
 
-        const result = await client.get<ODataResponse<GraphUser>>("/users", params);
+        const result = await client.get<ODataResponse<GraphUser>>("users", params);
         return {
           content: [
             {
@@ -72,7 +72,7 @@ export function registerUserTools(server: McpServer, client: GraphClient): void 
     },
     async ({ user_id }) => {
       try {
-        const result = await client.get<GraphUser>(`/users/${encodeURIComponent(user_id)}`, {
+        const result = await client.get<GraphUser>(`users/${encodeURIComponent(user_id)}`, {
           $select: `${USER_SELECT},signInActivity`,
         });
         return {
@@ -98,7 +98,7 @@ export function registerUserTools(server: McpServer, client: GraphClient): void 
     },
     async ({ user_id, properties }) => {
       try {
-        await client.patch(`/users/${encodeURIComponent(user_id)}`, properties);
+        await client.patch(`users/${encodeURIComponent(user_id)}`, properties);
         return {
           content: [
             {
