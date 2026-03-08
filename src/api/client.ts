@@ -103,6 +103,46 @@ export class GraphClient {
     return all;
   }
 
+  /** Make an authenticated GET request that returns plain text (not JSON). */
+  async getText(path: string, params?: Record<string, string>): Promise<string> {
+    const url = new URL(path, GRAPH_API_BASE);
+    if (params) {
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== "") url.searchParams.set(k, v);
+      }
+    }
+    return this.requestText("GET", url);
+  }
+
+  private async requestText(method: string, url: URL): Promise<string> {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const token = await getToken();
+      log(`${method} ${url.pathname}${url.search} (text)`);
+      const res = await fetch(url.toString(), {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get("Retry-After") ?? "10", 10);
+        logError(`Rate limited, waiting ${retryAfter}s`);
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+        continue;
+      }
+      if (res.status >= 500 && attempt < MAX_RETRIES) {
+        logError(`Server error ${res.status}, retrying in 1s`);
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Graph API error ${res.status}: ${text}`);
+      }
+      return await res.text();
+    }
+    throw new Error("Max retries exceeded");
+  }
+
   private async request<T>(
     method: string,
     url: URL,

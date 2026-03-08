@@ -1,6 +1,6 @@
 # connector-graph
 
-MCP server exposing 11 Microsoft Graph API tools for user management, group operations, and license inventory.
+MCP server exposing 19 Microsoft Graph API tools for user management, groups, licenses, mail, OneDrive, calendar, and meeting transcripts.
 
 ## Tech Stack
 
@@ -24,18 +24,21 @@ npm run dev       # Watch mode (tsc --watch)
 src/
 ├── index.ts              # MCP server entry point + graph_auth_status tool
 ├── api/
-│   ├── client.ts         # GraphClient — client credentials auth, token cache, 429 retry, OData pagination
-│   └── types.ts          # GraphUser, GraphGroup, GraphSubscribedSku, ODataResponse<T>
+│   ├── client.ts         # GraphClient — client credentials auth, token cache, 429 retry, OData pagination, getText for non-JSON
+│   └── types.ts          # All TypeScript interfaces (users, groups, licenses, mail, drive, calendar, meetings, transcripts)
 ├── tools/
 │   ├── users.ts          # graph_list_users, graph_get_user, graph_update_user
 │   ├── groups.ts         # graph_list_groups, graph_get_group_members, graph_add_group_member, graph_remove_group_member
-│   └── licenses.ts       # graph_list_subscribed_skus, graph_list_user_licenses
+│   ├── licenses.ts       # graph_list_subscribed_skus, graph_list_user_licenses
+│   ├── mail.ts           # graph_search_mail, graph_read_mail, graph_list_attachments
+│   ├── onedrive.ts       # graph_list_drive_items, graph_get_drive_item_content
+│   └── calendar.ts       # graph_list_events, graph_get_online_meeting, graph_list_meeting_transcripts, graph_get_meeting_transcript_content
 └── utils/
     ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET validation
     └── logger.ts         # Stderr logger
 ```
 
-## MCP Tools (11 total)
+## MCP Tools (19 total)
 
 | Tool | Description |
 |------|-------------|
@@ -49,6 +52,15 @@ src/
 | `graph_remove_group_member` | Remove user from group |
 | `graph_list_subscribed_skus` | License inventory (consumed/prepaid/available) |
 | `graph_list_user_licenses` | Licenses assigned to a specific user |
+| `graph_search_mail` | Search mailbox with $search/$filter |
+| `graph_read_mail` | Get full email content by message ID |
+| `graph_list_attachments` | List attachments on an email |
+| `graph_list_drive_items` | List OneDrive files/folders at a path |
+| `graph_get_drive_item_content` | Get file metadata and download URL |
+| `graph_list_events` | Calendar events in a date range with attendees and online meeting info |
+| `graph_get_online_meeting` | Get online meeting details by join URL (needed for transcript retrieval) |
+| `graph_list_meeting_transcripts` | List available transcripts for an online meeting |
+| `graph_get_meeting_transcript_content` | Get full meeting transcript text (VTT format with speakers and timestamps) |
 
 ## Configuration
 
@@ -65,10 +77,24 @@ The Entra app (`Majans-Graph-MCP-Agent`) needs these **application** permissions
 - `User.ReadWrite.All` — list/get/update users
 - `Group.ReadWrite.All` — list/manage groups and members
 - `Directory.Read.All` — directory metadata, signInActivity
-- `Reports.Read.All` — usage reports (future)
+- `Mail.Read` — read any user's mailbox
+- `Files.Read.All` — read any user's OneDrive files
+- `Calendars.Read` — read any user's calendar events
+- `OnlineMeetings.Read.All` — read online meeting details
+- `OnlineMeetingTranscript.Read.All` — read meeting transcripts
 
-## Phase 2 (future)
+## Meeting Transcript Workflow
+
+To fetch a meeting transcript programmatically:
+1. `graph_list_events` — find meetings in a date range (filter `isOnlineMeeting eq true`)
+2. `graph_get_online_meeting` — get meeting ID from the join URL (user must be organizer)
+3. `graph_list_meeting_transcripts` — list available transcripts for the meeting
+4. `graph_get_meeting_transcript_content` — download VTT transcript text
+
+The VTT transcript includes speaker names and timestamps. Agents can summarize it with Claude.
+
+## Phase 3 (future)
 
 - SharePoint tools: site access, drive listing, file read/write
-- Mail tools: list/get messages
-- Calendar tools
+- Teams chat tools: read meeting chat messages (for Copilot Facilitator summaries)
+- Reports tools: usage analytics

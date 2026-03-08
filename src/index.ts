@@ -7,6 +7,9 @@ import { GraphClient } from "./api/client.js";
 import { registerUserTools } from "./tools/users.js";
 import { registerGroupTools } from "./tools/groups.js";
 import { registerLicenseTools } from "./tools/licenses.js";
+import { registerMailTools } from "./tools/mail.js";
+import { registerOneDriveTools } from "./tools/onedrive.js";
+import { registerCalendarTools } from "./tools/calendar.js";
 
 async function main(): Promise<void> {
   validateConfig();
@@ -69,6 +72,9 @@ async function main(): Promise<void> {
   registerUserTools(server, client);
   registerGroupTools(server, client);
   registerLicenseTools(server, client);
+  registerMailTools(server, client);
+  registerOneDriveTools(server, client);
+  registerCalendarTools(server, client);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
