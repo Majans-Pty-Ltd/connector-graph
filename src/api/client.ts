@@ -64,10 +64,10 @@ export class GraphClient {
     return this.request<T>("GET", url);
   }
 
-  /** Make an authenticated PATCH request. */
-  async patch<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  /** Make an authenticated PATCH request. Optional extra headers (e.g. If-Match for Planner). */
+  async patch<T>(path: string, body: Record<string, unknown>, extraHeaders?: Record<string, string>): Promise<T> {
     const url = new URL(path, GRAPH_API_BASE);
-    return this.request<T>("PATCH", url, body);
+    return this.request<T>("PATCH", url, body, extraHeaders);
   }
 
   /** Make an authenticated POST request. */
@@ -76,10 +76,10 @@ export class GraphClient {
     return this.request<T>("POST", url, body);
   }
 
-  /** Make an authenticated DELETE request. */
-  async delete(path: string): Promise<void> {
+  /** Make an authenticated DELETE request. Optional extra headers (e.g. If-Match for Planner). */
+  async delete(path: string, extraHeaders?: Record<string, string>): Promise<void> {
     const url = new URL(path, GRAPH_API_BASE);
-    await this.request<void>("DELETE", url);
+    await this.request<void>("DELETE", url, undefined, extraHeaders);
   }
 
   /** Fetch all pages of a paginated OData response. */
@@ -146,7 +146,8 @@ export class GraphClient {
   private async request<T>(
     method: string,
     url: URL,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>
   ): Promise<T> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const token = await getToken();
@@ -154,6 +155,7 @@ export class GraphClient {
       const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
+        ...extraHeaders,
       };
       const init: RequestInit = { method, headers };
 
@@ -177,8 +179,8 @@ export class GraphClient {
         continue;
       }
 
-      // 204 No Content (DELETE responses)
-      if (res.status === 204) {
+      // 202 Accepted (sendMail) or 204 No Content (DELETE)
+      if (res.status === 202 || res.status === 204) {
         return undefined as T;
       }
 
