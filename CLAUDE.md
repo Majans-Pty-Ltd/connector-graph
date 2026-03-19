@@ -38,9 +38,12 @@ src/
 │   ├── planner.ts        # graph_list_plans, graph_get_plan, graph_list_buckets, graph_list_plan_tasks, graph_get_task, graph_create_task, graph_update_task, graph_delete_task
 │   ├── todo.ts           # graph_list_todo_lists, graph_list_todo_tasks, graph_create_todo_task, graph_update_todo_task, graph_complete_todo_task
 │   └── teams.ts          # graph_list_chats, graph_list_chat_messages, graph_send_chat_message
-└── utils/
-    ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET validation
-    └── logger.ts         # Stderr logger
+├── utils/
+│   ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET validation
+│   └── logger.ts         # Stderr logger
+.github/
+└── workflows/
+    └── deploy.yml        # CI/CD -> ACR -> Container Apps
 ```
 
 ## MCP Tools (42 total)
@@ -162,6 +165,35 @@ docker run -p 8030:8030 \
   -e PORT=8030 \
   connector-graph
 ```
+
+## Deployment
+
+**Live** on Azure Container Apps.
+
+| Resource | Value |
+|----------|-------|
+| Resource Group | `rg-majans-agents` |
+| Container Registry | `acrmajansagents.azurecr.io` |
+| Environment | `cae-majans-agents` (Australia East) |
+| Container App | `connector-graph` (external ingress, port 8030) |
+| CI/CD | `.github/workflows/deploy.yml` -- push to master -> ACR build -> Container Apps update |
+| Secrets | 1Password via `1password/load-secrets-action@v2` at deploy time |
+
+### GitHub Org Secrets Required
+
+| Secret | Source |
+|--------|--------|
+| `OP_SERVICE_ACCOUNT_TOKEN` | 1Password `Claude-CLI-2` service account |
+| `AZURE_CREDENTIALS` | Service principal `github-majans-agents` JSON |
+
+### 1Password References
+
+| Env Var | 1Password Reference |
+|---------|-------------------|
+| `GRAPH_TENANT_ID` | `op://Majans Dev/Graph MCP Agent/tenant_id` |
+| `GRAPH_CLIENT_ID` | `op://Majans Dev/Graph MCP Agent/client_id` |
+| `GRAPH_CLIENT_SECRET` | `op://Majans Dev/Graph MCP Agent/client_secret` |
+| `GRAPH_API_KEY` | `op://Majans Dev/Graph MCP API Key/credential` |
 
 ## Entra App Requirements
 
