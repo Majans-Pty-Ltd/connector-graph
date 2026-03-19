@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../api/client.js";
-import type { GraphMailMessage, GraphMailMessageFull, GraphAttachment, ODataResponse } from "../api/types.js";
+import type { GraphMailMessage, GraphMailMessageFull, GraphAttachment, GraphSendMailRecipient, ODataResponse } from "../api/types.js";
 
 const MAIL_SELECT = "id,subject,bodyPreview,from,toRecipients,receivedDateTime,isRead,hasAttachments,importance";
 
@@ -49,6 +49,78 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
       } catch (err) {
         return {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "graph_send_mail",
+    "Send an email on behalf of a user via Microsoft Graph API. Requires Mail.Send application permission. Supports HTML or plain text body, multiple recipients, CC, and importance level.",
+    {
+      sender: z.string().describe("Sender user ID (GUID) or UPN (e.g. amit@majans.com). The email is sent from this mailbox."),
+      to: z.array(z.object({
+        address: z.string().describe("Recipient email address"),
+        name: z.string().optional().describe("Recipient display name"),
+      })).describe("To recipients (at least one required)"),
+      subject: z.string().describe("Email subject line"),
+      body: z.string().describe("Email body content (HTML or plain text)"),
+      body_type: z.enum(["HTML", "Text"]).optional().describe("Body content type (default HTML)"),
+      cc: z.array(z.object({
+        address: z.string().describe("CC email address"),
+        name: z.string().optional().describe("CC display name"),
+      })).optional().describe("CC recipients"),
+      importance: z.enum(["low", "normal", "high"]).optional().describe("Email importance (default normal)"),
+      save_to_sent: z.boolean().optional().describe("Save to Sent Items (default true)"),
+    },
+    async ({ sender, to, subject, body, body_type, cc, importance, save_to_sent }) => {
+      try {
+        const toRecipients: GraphSendMailRecipient[] = to.map(r => ({
+          emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
+        }));
+
+        const ccRecipients: GraphSendMailRecipient[] | undefined = cc?.map(r => ({
+          emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
+        }));
+
+        const payload: Record<string, unknown> = {
+          message: {
+            subject,
+            body: { contentType: body_type ?? "HTML", content: body },
+            toRecipients,
+            ...(ccRecipients ? { ccRecipients } : {}),
+            ...(importance ? { importance } : {}),
+          },
+          saveToSentItems: save_to_sent ?? true,
+        };
+
+        await client.post<void>(
+          `users/${encodeURIComponent(sender)}/sendMail`,
+          payload
+        );
+
+        const recipientList = to.map(r => r.address).join(", ");
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  sent: true,
+                  from: sender,
+                  to: recipientList,
+                  subject,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error sending email: ${(err as Error).message}` }],
           isError: true,
         };
       }

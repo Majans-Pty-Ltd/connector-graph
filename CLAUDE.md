@@ -7,7 +7,7 @@ MCP server exposing 42 Microsoft Graph API tools for user management, groups, li
 - **Runtime**: Node.js (ES2022, ES modules)
 - **Language**: TypeScript 5.7+
 - **Protocol**: MCP SDK (stdio + StreamableHTTP transport)
-- **Auth**: Client credentials (Service Principal, app-only)
+- **Auth**: Dual — delegated (user Bearer token) + app-only (Service Principal)
 - **API**: Microsoft Graph REST API v1.0
 
 ## Key Commands
@@ -23,10 +23,10 @@ PORT=8030 npm start  # Start as HTTP server (StreamableHTTP)
 
 ```
 src/
-├── index.ts              # MCP server entry point + graph_auth_status tool + dual transport (stdio/HTTP)
+├── index.ts              # MCP server entry point + graph_auth_status tool + dual transport (stdio/HTTP) + dual auth (delegated/SP)
 ├── api/
-│   ├── client.ts         # GraphClient — client credentials auth, token cache, 429 retry, OData pagination, getText for non-JSON, If-Match header support
-│   └── types.ts          # All TypeScript interfaces (users, groups, licenses, mail, drive, calendar, meetings, transcripts, sharepoint, planner, todo, teams)
+│   ├── client.ts         # GraphClient — dual auth (user token → SP fallback), token cache, 429 retry, OData pagination, getText, If-Match
+│   └── types.ts          # All TypeScript interfaces
 ├── tools/
 │   ├── users.ts          # graph_list_users, graph_get_user, graph_update_user
 │   ├── groups.ts         # graph_list_groups, graph_get_group_members, graph_add_group_member, graph_remove_group_member
@@ -39,8 +39,11 @@ src/
 │   ├── todo.ts           # graph_list_todo_lists, graph_list_todo_tasks, graph_create_todo_task, graph_update_todo_task, graph_complete_todo_task
 │   └── teams.ts          # graph_list_chats, graph_list_chat_messages, graph_send_chat_message
 ├── utils/
-│   ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET validation
+│   ├── auth.ts           # AsyncLocalStorage for per-request user tokens (delegated auth context)
+│   ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET, API_KEY validation
 │   └── logger.ts         # Stderr logger
+get-user-token.py          # MSAL device-code flow — acquires delegated Graph token for users
+start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote for Claude Code
 .github/
 └── workflows/
     └── deploy.yml        # CI/CD -> ACR -> Container Apps
@@ -51,7 +54,7 @@ src/
 ### Auth (1)
 | Tool | Description |
 |------|-------------|
-| `graph_auth_status` | Verify auth, show org name and client ID |
+| `graph_auth_status` | Verify auth — reports auth mode (delegated/app-only), user identity or org info |
 
 ### Users (3)
 | Tool | Description |
@@ -138,20 +141,82 @@ src/
 
 Required env vars:
 - `GRAPH_TENANT_ID` — Azure AD tenant ID
-- `GRAPH_CLIENT_ID` — Entra app client ID
+- `GRAPH_CLIENT_ID` — Entra app client ID (SP: `Majans-Graph-MCP-Agent`)
 - `GRAPH_CLIENT_SECRET` — Entra app client secret
+- `GRAPH_API_KEY` — (optional) API key for agent access when no Bearer token. If set, requests without Bearer token must provide `X-API-Key` header.
 - `PORT` — (optional) Set to enable StreamableHTTP transport (e.g. `8030`). Omit for stdio.
 
 Use 1Password: `op run --env-file=.env.template -- npm start`
 
+## Dual Auth Architecture
+
+Two auth paths coexist on the same server. Tool functions are identical — auth switching is transparent.
+
+```
+Majans Users (Claude Code)              Agents (Container Apps)
+        │                                    │
+        │ MSAL device-code flow              │ Service Principal
+        │ (get-user-token.py)                │ (client credentials)
+        ▼                                    ▼
+    /mcp endpoint                        /mcp endpoint
+    Authorization: Bearer <user_token>   X-API-Key header (no Bearer)
+    Graph sees the user's identity       Graph sees SP identity
+    User only accesses own data          SP has full tenant access
+```
+
+### How It Works
+
+1. **HTTP request arrives** at `/mcp`
+2. `index.ts` checks for `Authorization: Bearer` header
+3. If present → stores user token in `AsyncLocalStorage` (per-request context)
+4. If absent → validates `X-API-Key` header (agent path)
+5. `GraphClient.getToken()` checks `AsyncLocalStorage` first, falls back to SP token
+6. Graph API enforces permissions based on whichever token is used
+
+### Auth Mode Detection
+
+`graph_auth_status` tool reports which mode is active:
+- **Delegated**: returns `auth_mode: "delegated"`, user name, email
+- **App-only**: returns `auth_mode: "app-only"`, org name, client ID
+
+### Per-User Permissions (Delegated)
+
+With delegated auth, Graph API enforces the user's own permissions:
+- **Mail**: user can only read/send their own email
+- **Calendar**: user can only see their own events
+- **OneDrive**: user can only access their own files
+- **To Do**: user can only see their own task lists
+- **Teams**: user can only see chats they're part of
+- **SharePoint**: user can only access sites they have permission to
+- **Planner**: user can only see plans for groups they belong to
+- **Users/Groups**: limited by the user's directory role (most users get read-only basic profiles)
+
+### User Setup (Claude Code)
+
+1. Set `GRAPH_MCP_CLIENT_ID` env var to the `Graph-MCP-User` Entra app client ID
+2. Register in Claude Code MCP config:
+   ```json
+   {
+     "graph": {
+       "type": "stdio",
+       "command": "cmd",
+       "args": ["/c", "C:\\path\\to\\connector-graph\\start-mcp.cmd"]
+     }
+   }
+   ```
+3. First run: browser opens for device-code login (Entra ID)
+4. Subsequent runs: token refreshes silently from cache (`~/.connector-graph/token_cache.bin`)
+
+Prerequisites: Python 3.10+ (`pip install msal`), Node.js (`npx mcp-remote`)
+
 ## Transport Modes
 
 ### stdio (default)
-Used when `PORT` is not set. Standard MCP stdio transport for local Claude Desktop / Claude Code usage.
+Used when `PORT` is not set. Standard MCP stdio transport for local Claude Desktop / Claude Code usage. Uses SP auth (no delegated path in stdio mode).
 
 ### StreamableHTTP
 Used when `PORT` is set. Starts an HTTP server with:
-- `POST /mcp` — MCP StreamableHTTP endpoint
+- `POST /mcp` — MCP StreamableHTTP endpoint (supports Bearer token for delegated auth)
 - `GET /health` — Health check for container probes
 
 ### Docker Deployment
@@ -162,6 +227,7 @@ docker run -p 8030:8030 \
   -e GRAPH_TENANT_ID=... \
   -e GRAPH_CLIENT_ID=... \
   -e GRAPH_CLIENT_SECRET=... \
+  -e GRAPH_API_KEY=... \
   -e PORT=8030 \
   connector-graph
 ```
@@ -197,9 +263,10 @@ docker run -p 8030:8030 \
 
 ## Entra App Requirements
 
-The Entra app (`Majans-Graph-MCP-Agent`) needs these **application** permissions with admin consent:
+### App 1: `Majans-Graph-MCP-Agent` (app-only, for agents)
 
-### Existing
+**Application** permissions with admin consent:
+
 - `User.ReadWrite.All` — list/get/update users
 - `Group.ReadWrite.All` — list/manage groups and members
 - `Directory.Read.All` — directory metadata, signInActivity
@@ -209,13 +276,36 @@ The Entra app (`Majans-Graph-MCP-Agent`) needs these **application** permissions
 - `Calendars.Read` — read any user's calendar events
 - `OnlineMeetings.Read.All` — read online meeting details
 - `OnlineMeetingTranscript.Read.All` — read meeting transcripts
-
-### New (for Phase 3 tools)
 - `Sites.ReadWrite.All` — SharePoint site access, document library read/write
 - `Tasks.ReadWrite.All` — Planner plans, buckets, tasks (app-only)
 - `Tasks.ReadWrite` — Microsoft To Do lists and tasks
 - `Chat.Read.All` — read Teams chats and messages
 - `Chat.ReadWrite.All` — send messages to Teams chats
+
+### App 2: `Graph-MCP-User` (delegated, for users)
+
+**Setup in Azure Portal:**
+1. App registrations > New registration
+2. Name: `Graph-MCP-User`
+3. Supported account types: Single tenant (Majans only)
+4. Redirect URI: leave blank (device-code doesn't need it)
+5. Authentication > Advanced settings > Allow public client flows: **Yes**
+
+**Delegated** permissions (admin consent recommended for smooth UX):
+
+- `User.Read` — read own profile
+- `User.ReadBasic.All` — read basic profiles of other users
+- `Mail.ReadWrite` — read/manage own email
+- `Mail.Send` — send email as self
+- `Files.ReadWrite` — own OneDrive files
+- `Calendars.ReadWrite` — own calendar events
+- `Sites.Read.All` — SharePoint sites (scoped by site permissions)
+- `Tasks.ReadWrite` — Planner + To Do tasks
+- `Chat.ReadWrite` — Teams chats user is part of
+- `OnlineMeetings.Read` — own meeting details
+
+**Client ID**: `02fa0ea1-4b30-4bd9-9c4a-483f97d63b21`
+**1Password**: `op://Majans Dev/Graph MCP User/client_id`
 
 ## Meeting Transcript Workflow
 

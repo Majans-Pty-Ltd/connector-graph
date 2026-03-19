@@ -4,6 +4,7 @@ import {
   GRAPH_CLIENT_SECRET,
   GRAPH_API_BASE,
 } from "../utils/config.js";
+import { getUserToken } from "../utils/auth.js";
 import { log, logError } from "../utils/logger.js";
 import type { ODataResponse } from "./types.js";
 
@@ -16,7 +17,8 @@ interface TokenCache {
 
 let tokenCache: TokenCache | null = null;
 
-async function getToken(): Promise<string> {
+/** Acquire a Service Principal token via client credentials grant. */
+async function getSpToken(): Promise<string> {
   const now = Date.now();
   if (tokenCache && tokenCache.expiresAt > now + 60_000) {
     return tokenCache.token;
@@ -48,8 +50,26 @@ async function getToken(): Promise<string> {
     token: data.access_token,
     expiresAt: now + data.expires_in * 1000,
   };
-  log("Token acquired");
+  log("SP token acquired");
   return tokenCache.token;
+}
+
+/**
+ * Get the auth token for the current request.
+ * Uses the user's delegated token if available (per-user access),
+ * otherwise falls back to Service Principal token (agent access).
+ */
+async function getToken(): Promise<string> {
+  const userToken = getUserToken();
+  if (userToken) {
+    return userToken;
+  }
+  return getSpToken();
+}
+
+/** Returns true if the current request is using a delegated user token. */
+export function isDelegatedAuth(): boolean {
+  return getUserToken() !== undefined;
 }
 
 export class GraphClient {
