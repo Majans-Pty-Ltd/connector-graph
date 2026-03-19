@@ -1,22 +1,26 @@
 # Current State
 
 ## Status
-Stable — Phase 3 complete (SharePoint, Planner, To Do, Teams Chat)
+Stable — Dual auth live (delegated + app-only). 43 tools across 10 categories.
 
 ## Active Work
-Microsoft Graph MCP — 42 tools across 10 categories (users, groups, licenses, mail, OneDrive, calendar, SharePoint, Planner, To Do, Teams Chat)
+Per-user delegated auth deployed. Majans staff can now connect with their own Entra ID via `start-mcp.cmd`.
 
 ## Recent Changes
-- Added 22 new tools: SharePoint (6), Planner (8), To Do (5), Teams Chat (3)
-- Added StreamableHTTP transport (set PORT env var to enable)
-- Added Dockerfile for containerized deployment
-- Updated client.ts: patch() and delete() now support extra headers (If-Match for Planner)
-- Version bumped to 2.0.0
+- Added delegated auth path — users authenticate via MSAL device-code flow, Graph enforces their own permissions
+- Entra app `Graph-MCP-User` (`02fa0ea1-4b30-4bd9-9c4a-483f97d63b21`) created with 10 delegated permissions
+- `src/utils/auth.ts`: AsyncLocalStorage for per-request user token context
+- `src/api/client.ts`: `getToken()` checks user token first, falls back to SP
+- `src/index.ts`: Bearer token extraction, API key validation for agent path
+- `get-user-token.py` + `start-mcp.cmd`: user-facing scripts for Claude Code
+- Added `graph_send_mail` tool (43 tools total)
+- 1Password item `Graph MCP User` created in Majans Dev vault
+- Admin consent granted for all delegated permissions
 
 ## Pending
-- Grant new Entra app permissions: Sites.ReadWrite.All, Tasks.ReadWrite.All, Tasks.ReadWrite, Chat.Read.All, Chat.ReadWrite.All
-- Test new tools against live Graph API
-- Deploy container to Azure Container Apps (port 8030)
+- Roll out `start-mcp.cmd` to Majans staff (see USER-SETUP.md)
+- Consider bundling into a Claude Code plugin for easier distribution
+- Monitor token refresh reliability across users
 
 ## Key Files for Current Work
-src/tools/sharepoint.ts, src/tools/planner.ts, src/tools/todo.ts, src/tools/teams.ts
+src/utils/auth.ts, src/api/client.ts, src/index.ts, get-user-token.py, start-mcp.cmd
