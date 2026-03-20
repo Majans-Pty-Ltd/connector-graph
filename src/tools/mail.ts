@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../api/client.js";
-import type { GraphMailMessage, GraphMailMessageFull, GraphAttachment, GraphSendMailRecipient, ODataResponse } from "../api/types.js";
+import type { GraphMailMessage, GraphMailMessageFull, GraphAttachment, GraphFileAttachment, GraphSendMailRecipient, ODataResponse } from "../api/types.js";
+import { extractContent } from "../utils/content-extractor.js";
 
 const MAIL_SELECT = "id,subject,bodyPreview,from,toRecipients,receivedDateTime,isRead,hasAttachments,importance";
 
@@ -175,6 +176,139 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
               type: "text" as const,
               text: JSON.stringify(
                 { count: result.value.length, attachments: result.value },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "graph_get_attachment",
+    "Download an email attachment's content by message ID and attachment ID. Returns decoded text for text-based types, or base64 for binary files.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN"),
+      message_id: z.string().describe("Message ID that contains the attachment"),
+      attachment_id: z.string().describe("Attachment ID (from graph_list_attachments)"),
+    },
+    async ({ user_id, message_id, attachment_id }) => {
+      try {
+        const result = await client.get<GraphFileAttachment>(
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
+          {
+            $select: "id,name,contentType,size,isInline,contentBytes",
+          }
+        );
+
+        const contentType = result.contentType ?? "";
+        const isTextType =
+          contentType.startsWith("text/") ||
+          contentType.includes("json") ||
+          contentType.includes("xml") ||
+          contentType.includes("csv");
+
+        let content: string;
+        if (isTextType && result.contentBytes) {
+          // Decode base64 to UTF-8 text for text-based attachments
+          content = Buffer.from(result.contentBytes, "base64").toString("utf-8");
+        } else {
+          // Return raw base64 for binary files (images, PDFs, etc.)
+          content = result.contentBytes ?? "";
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  id: result.id,
+                  name: result.name,
+                  contentType: result.contentType,
+                  size: result.size,
+                  encoding: isTextType ? "utf-8" : "base64",
+                  content,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "graph_read_attachment",
+    "Download an email attachment and extract readable text content. Supports PDF, Word (.docx), Excel (.xlsx), HTML, CSV, EML, images, and plain text files. For unsupported types, use graph_get_attachment instead.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com)"),
+      message_id: z.string().describe("Message ID (from graph_search_mail or graph_read_mail)"),
+      attachment_id: z.string().describe("Attachment ID (from graph_list_attachments)"),
+    },
+    async ({ user_id, message_id, attachment_id }) => {
+      try {
+        const result = await client.get<GraphFileAttachment>(
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
+          {
+            $select: "id,name,contentType,size,isInline,contentBytes",
+          }
+        );
+
+        if (!result.contentBytes) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    name: result.name,
+                    contentType: result.contentType,
+                    size: result.size,
+                    extractedText: "No content available (attachment may be a reference or item attachment).",
+                    format: "unsupported",
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        const extraction = await extractContent(
+          result.contentBytes,
+          result.contentType ?? "",
+          result.name ?? "unknown"
+        );
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  name: result.name,
+                  contentType: result.contentType,
+                  size: result.size,
+                  extractedText: extraction.extractedText,
+                  format: extraction.format,
+                  ...(extraction.metadata ? { metadata: extraction.metadata } : {}),
+                },
                 null,
                 2
               ),

@@ -79,7 +79,10 @@ export function registerCalendarTools(server: McpServer, client: GraphClient): v
         const filter = `joinWebUrl eq '${join_url.replace(/'/g, "''")}'`;
         const result = await client.get<ODataResponse<GraphOnlineMeeting>>(
           `users/${encodeURIComponent(user_id)}/onlineMeetings`,
-          { $filter: filter }
+          {
+            $filter: filter,
+            $select: "id,subject,startDateTime,endDateTime,joinWebUrl,chatInfo,participants",
+          }
         );
         if (result.value.length === 0) {
           return {
@@ -113,7 +116,8 @@ export function registerCalendarTools(server: McpServer, client: GraphClient): v
     async ({ user_id, meeting_id }) => {
       try {
         const result = await client.get<ODataResponse<GraphTranscript>>(
-          `users/${encodeURIComponent(user_id)}/onlineMeetings/${encodeURIComponent(meeting_id)}/transcripts`
+          `users/${encodeURIComponent(user_id)}/onlineMeetings/${encodeURIComponent(meeting_id)}/transcripts`,
+          { $select: "id,meetingId,meetingOrganizerId,createdDateTime,transcriptContentUrl" }
         );
         return {
           content: [

@@ -68,6 +68,7 @@ export function registerTeamsTools(server: McpServer, client: GraphClient): void
         const params: Record<string, string> = {
           $top: String(top ?? 50),
           $orderby: "createdDateTime desc",
+          $select: "id,createdDateTime,lastModifiedDateTime,messageType,from,body,importance,attachments",
         };
         if (filter) params.$filter = filter;
 

@@ -1,6 +1,6 @@
 # connector-graph
 
-MCP server exposing 42 Microsoft Graph API tools for user management, groups, licenses, mail, OneDrive, calendar, meeting transcripts, SharePoint, Planner, To Do, and Teams Chat.
+MCP server exposing 44 Microsoft Graph API tools for user management, groups, licenses, mail, OneDrive, calendar, meeting transcripts, SharePoint, Planner, To Do, and Teams Chat.
 
 ## Tech Stack
 
@@ -31,16 +31,19 @@ src/
 │   ├── users.ts          # graph_list_users, graph_get_user, graph_update_user
 │   ├── groups.ts         # graph_list_groups, graph_get_group_members, graph_add_group_member, graph_remove_group_member
 │   ├── licenses.ts       # graph_list_subscribed_skus, graph_list_user_licenses
-│   ├── mail.ts           # graph_send_mail, graph_search_mail, graph_read_mail, graph_list_attachments
+│   ├── mail.ts           # graph_send_mail, graph_search_mail, graph_read_mail, graph_list_attachments, graph_get_attachment, graph_read_attachment
 │   ├── onedrive.ts       # graph_list_drive_items, graph_get_drive_item_content
 │   ├── calendar.ts       # graph_list_events, graph_get_online_meeting, graph_list_meeting_transcripts, graph_get_meeting_transcript_content
 │   ├── sharepoint.ts     # graph_list_sites, graph_get_site, graph_list_site_drives, graph_list_site_drive_items, graph_get_site_file_content, graph_search_site_files
 │   ├── planner.ts        # graph_list_plans, graph_get_plan, graph_list_buckets, graph_list_plan_tasks, graph_get_task, graph_create_task, graph_update_task, graph_delete_task
 │   ├── todo.ts           # graph_list_todo_lists, graph_list_todo_tasks, graph_create_todo_task, graph_update_todo_task, graph_complete_todo_task
 │   └── teams.ts          # graph_list_chats, graph_list_chat_messages, graph_send_chat_message
+├── types/
+│   └── mammoth.d.ts      # Type declarations for mammoth (no bundled types)
 ├── utils/
 │   ├── auth.ts           # AsyncLocalStorage for per-request user tokens (delegated auth context)
 │   ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET, API_KEY validation
+│   ├── content-extractor.ts  # Attachment content extraction (PDF, Word, Excel, HTML, CSV, EML, images)
 │   └── logger.ts         # Stderr logger
 get-user-token.py          # MSAL device-code flow — acquires delegated Graph token for users
 start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote for Claude Code
@@ -49,7 +52,7 @@ start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote
     └── deploy.yml        # CI/CD -> ACR -> Container Apps
 ```
 
-## MCP Tools (42 total)
+## MCP Tools (44 total)
 
 ### Auth (1)
 | Tool | Description |
@@ -77,13 +80,15 @@ start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote
 | `graph_list_subscribed_skus` | License inventory (consumed/prepaid/available) |
 | `graph_list_user_licenses` | Licenses assigned to a specific user |
 
-### Mail (4)
+### Mail (6)
 | Tool | Description |
 |------|-------------|
 | `graph_send_mail` | Send email from a user's mailbox (HTML/text, to/cc, importance) |
 | `graph_search_mail` | Search mailbox with $search/$filter |
 | `graph_read_mail` | Get full email content by message ID |
 | `graph_list_attachments` | List attachments on an email |
+| `graph_get_attachment` | Download attachment content (decoded text or base64 binary) |
+| `graph_read_attachment` | Download attachment and extract readable text (PDF, Word, Excel, HTML, CSV, EML, images, plain text) |
 
 ### OneDrive (2)
 | Tool | Description |

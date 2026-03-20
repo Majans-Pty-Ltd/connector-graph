@@ -10,7 +10,10 @@ export function registerLicenseTools(server: McpServer, client: GraphClient): vo
     {},
     async () => {
       try {
-        const result = await client.get<ODataResponse<GraphSubscribedSku>>("subscribedSkus");
+        const result = await client.get<ODataResponse<GraphSubscribedSku>>(
+          "subscribedSkus",
+          { $select: "id,skuId,skuPartNumber,appliesTo,capabilityStatus,consumedUnits,prepaidUnits" }
+        );
         const skus = result.value.map((sku) => ({
           skuPartNumber: sku.skuPartNumber,
           skuId: sku.skuId,
@@ -46,7 +49,8 @@ export function registerLicenseTools(server: McpServer, client: GraphClient): vo
     async ({ user_id }) => {
       try {
         const result = await client.get<ODataResponse<GraphLicenseDetail>>(
-          `users/${encodeURIComponent(user_id)}/licenseDetails`
+          `users/${encodeURIComponent(user_id)}/licenseDetails`,
+          { $select: "id,skuId,skuPartNumber,servicePlans" }
         );
         const licenses = result.value.map((lic) => ({
           skuPartNumber: lic.skuPartNumber,

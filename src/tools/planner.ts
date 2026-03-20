@@ -8,6 +8,10 @@ import type {
   ODataResponse,
 } from "../api/types.js";
 
+const PLAN_SELECT = "id,title,owner,createdDateTime,createdBy";
+const BUCKET_SELECT = "id,name,planId,orderHint";
+const TASK_SELECT = "id,title,planId,bucketId,percentComplete,startDateTime,dueDateTime,createdDateTime,completedDateTime,priority,assignments,appliedCategories,orderHint,createdBy";
+
 export function registerPlannerTools(server: McpServer, client: GraphClient): void {
   server.tool(
     "graph_list_plans",
@@ -18,7 +22,8 @@ export function registerPlannerTools(server: McpServer, client: GraphClient): vo
     async ({ group_id }) => {
       try {
         const result = await client.get<ODataResponse<GraphPlannerPlan>>(
-          `groups/${encodeURIComponent(group_id)}/planner/plans`
+          `groups/${encodeURIComponent(group_id)}/planner/plans`,
+          { $select: PLAN_SELECT }
         );
         return {
           content: [
@@ -50,7 +55,8 @@ export function registerPlannerTools(server: McpServer, client: GraphClient): vo
     async ({ plan_id }) => {
       try {
         const result = await client.get<GraphPlannerPlan>(
-          `planner/plans/${encodeURIComponent(plan_id)}`
+          `planner/plans/${encodeURIComponent(plan_id)}`,
+          { $select: PLAN_SELECT }
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
@@ -73,7 +79,8 @@ export function registerPlannerTools(server: McpServer, client: GraphClient): vo
     async ({ plan_id }) => {
       try {
         const result = await client.get<ODataResponse<GraphPlannerBucket>>(
-          `planner/plans/${encodeURIComponent(plan_id)}/buckets`
+          `planner/plans/${encodeURIComponent(plan_id)}/buckets`,
+          { $select: BUCKET_SELECT }
         );
         return {
           content: [
@@ -105,7 +112,8 @@ export function registerPlannerTools(server: McpServer, client: GraphClient): vo
     async ({ plan_id }) => {
       try {
         const tasks = await client.getAll<GraphPlannerTask>(
-          `planner/plans/${encodeURIComponent(plan_id)}/tasks`
+          `planner/plans/${encodeURIComponent(plan_id)}/tasks`,
+          { $select: TASK_SELECT }
         );
         return {
           content: [
@@ -151,7 +159,8 @@ export function registerPlannerTools(server: McpServer, client: GraphClient): vo
     async ({ task_id }) => {
       try {
         const result = await client.get<GraphPlannerTask>(
-          `planner/tasks/${encodeURIComponent(task_id)}`
+          `planner/tasks/${encodeURIComponent(task_id)}`,
+          { $select: TASK_SELECT }
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],

@@ -13,7 +13,8 @@ export function registerTodoTools(server: McpServer, client: GraphClient): void 
     async ({ user_id }) => {
       try {
         const result = await client.get<ODataResponse<GraphTodoList>>(
-          `users/${encodeURIComponent(user_id)}/todo/lists`
+          `users/${encodeURIComponent(user_id)}/todo/lists`,
+          { $select: "id,displayName,isOwner,isShared,wellknownListName" }
         );
         return {
           content: [
@@ -50,6 +51,7 @@ export function registerTodoTools(server: McpServer, client: GraphClient): void 
         const params: Record<string, string> = {
           $top: String(top ?? 50),
           $orderby: "createdDateTime desc",
+          $select: "id,title,status,importance,isReminderOn,createdDateTime,lastModifiedDateTime,completedDateTime,dueDateTime,body",
         };
         if (filter) params.$filter = filter;
 

@@ -7,6 +7,19 @@ import {
 import { getUserToken } from "../utils/auth.js";
 import { log, logError } from "../utils/logger.js";
 import type { ODataResponse } from "./types.js";
+import { Agent, setGlobalDispatcher } from "undici";
+
+// ── Connection pooling ──
+// Configure undici Agent with keep-alive and higher connection limits for Graph API.
+// Native fetch in Node.js uses undici internally; setGlobalDispatcher controls its pool.
+const keepAliveAgent = new Agent({
+  keepAliveTimeout: 30_000,       // keep idle connections for 30s
+  keepAliveMaxTimeout: 120_000,   // max idle time 2 min
+  connections: 25,                // max connections per origin
+  pipelining: 1,                  // HTTP/1.1 pipelining (1 = no pipelining, safe default)
+});
+setGlobalDispatcher(keepAliveAgent);
+log("HTTP keep-alive agent configured (25 connections/origin, 30s idle timeout)");
 
 const MAX_RETRIES = 2;
 
@@ -17,6 +30,11 @@ interface TokenCache {
 
 let tokenCache: TokenCache | null = null;
 
+// ── Token refresh synchronization ──
+// Prevents thundering herd: if multiple concurrent requests need a fresh SP token,
+// only one request performs the refresh; others await the same promise.
+let tokenRefreshPromise: Promise<string> | null = null;
+
 /** Acquire a Service Principal token via client credentials grant. */
 async function getSpToken(): Promise<string> {
   const now = Date.now();
@@ -24,34 +42,54 @@ async function getSpToken(): Promise<string> {
     return tokenCache.token;
   }
 
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: GRAPH_CLIENT_ID,
-    client_secret: GRAPH_CLIENT_SECRET,
-    scope: "https://graph.microsoft.com/.default",
-  });
-
-  const res = await fetch(
-    `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    }
-  );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Token acquisition failed (${res.status}): ${text}`);
+  // If a refresh is already in progress, piggyback on it
+  if (tokenRefreshPromise) {
+    return tokenRefreshPromise;
   }
 
-  const data = (await res.json()) as { access_token: string; expires_in: number };
-  tokenCache = {
-    token: data.access_token,
-    expiresAt: now + data.expires_in * 1000,
-  };
-  log("SP token acquired");
-  return tokenCache.token;
+  // Start the refresh and store the promise so concurrent callers share it
+  tokenRefreshPromise = (async () => {
+    try {
+      // Re-check cache after acquiring the "lock" — another caller may have refreshed
+      const nowInner = Date.now();
+      if (tokenCache && tokenCache.expiresAt > nowInner + 60_000) {
+        return tokenCache.token;
+      }
+
+      const body = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: GRAPH_CLIENT_ID,
+        client_secret: GRAPH_CLIENT_SECRET,
+        scope: "https://graph.microsoft.com/.default",
+      });
+
+      const res = await fetch(
+        `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+        }
+      );
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Token acquisition failed (${res.status}): ${text}`);
+      }
+
+      const data = (await res.json()) as { access_token: string; expires_in: number };
+      tokenCache = {
+        token: data.access_token,
+        expiresAt: nowInner + data.expires_in * 1000,
+      };
+      log("SP token acquired");
+      return tokenCache.token;
+    } finally {
+      tokenRefreshPromise = null;
+    }
+  })();
+
+  return tokenRefreshPromise;
 }
 
 /**

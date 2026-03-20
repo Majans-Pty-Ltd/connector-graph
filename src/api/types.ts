@@ -92,6 +92,11 @@ export interface GraphAttachment {
   isInline: boolean;
 }
 
+export interface GraphFileAttachment extends GraphAttachment {
+  "@odata.type": string;
+  contentBytes: string;  // base64-encoded content
+}
+
 export interface GraphDriveItem {
   id: string;
   name: string;
