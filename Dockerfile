@@ -1,13 +1,25 @@
+# Build stage — compile TypeScript
+FROM node:22-slim AS build
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src/ src/
+
+RUN npm run build
+
+# Production stage — runtime only
 FROM node:22-slim
 
 WORKDIR /app
 
-# Copy package files and install production dependencies
 COPY package*.json ./
-RUN npm ci --production
+RUN npm ci --omit=dev
 
-# Copy pre-built TypeScript output
-COPY dist/ dist/
+COPY --from=build /app/dist/ dist/
 
 EXPOSE 8030
 
