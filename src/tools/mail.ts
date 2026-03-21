@@ -129,6 +129,90 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
   );
 
   server.tool(
+    "graph_create_draft",
+    "Create an Outlook draft email with optional file attachments. Draft is saved to the user's Drafts folder but NOT sent. Use this when the user wants to review before sending, or when attachments are needed.",
+    {
+      sender: z.string().describe("Sender user ID (GUID) or UPN (e.g. amit@majans.com). Draft is created in this mailbox."),
+      to: z.array(z.object({
+        address: z.string().describe("Recipient email address"),
+        name: z.string().optional().describe("Recipient display name"),
+      })).describe("To recipients (at least one required)"),
+      subject: z.string().describe("Email subject line"),
+      body: z.string().describe("Email body content (HTML or plain text)"),
+      body_type: z.enum(["HTML", "Text"]).optional().describe("Body content type (default HTML)"),
+      cc: z.array(z.object({
+        address: z.string().describe("CC email address"),
+        name: z.string().optional().describe("CC display name"),
+      })).optional().describe("CC recipients"),
+      importance: z.enum(["low", "normal", "high"]).optional().describe("Email importance (default normal)"),
+      attachments: z.array(z.object({
+        filename: z.string().describe("Attachment filename (e.g. 'report.pdf')"),
+        content_base64: z.string().describe("Base64-encoded file content"),
+        content_type: z.string().describe("MIME type (e.g. 'application/vnd.openxmlformats-officedocument.presentationml.presentation')"),
+      })).optional().describe("File attachments (base64-encoded)"),
+    },
+    async ({ sender, to, subject, body, body_type, cc, importance, attachments }) => {
+      try {
+        const toRecipients: GraphSendMailRecipient[] = to.map(r => ({
+          emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
+        }));
+
+        const ccRecipients: GraphSendMailRecipient[] | undefined = cc?.map(r => ({
+          emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
+        }));
+
+        const payload: Record<string, unknown> = {
+          subject,
+          body: { contentType: body_type ?? "HTML", content: body },
+          toRecipients,
+          ...(ccRecipients ? { ccRecipients } : {}),
+          ...(importance ? { importance } : {}),
+          ...(attachments && attachments.length > 0 ? {
+            attachments: attachments.map(a => ({
+              "@odata.type": "#microsoft.graph.fileAttachment",
+              name: a.filename,
+              contentBytes: a.content_base64,
+              contentType: a.content_type,
+            })),
+          } : {}),
+        };
+
+        const result = await client.post<{ id: string; subject: string; webLink?: string }>(
+          `users/${encodeURIComponent(sender)}/messages`,
+          payload
+        );
+
+        const recipientList = to.map(r => r.address).join(", ");
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  created: true,
+                  draft_id: result.id,
+                  from: sender,
+                  to: recipientList,
+                  subject,
+                  attachment_count: attachments?.length ?? 0,
+                  ...(result.webLink ? { web_link: result.webLink } : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error creating draft: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "graph_read_mail",
     "Get full email content (including body) by message ID.",
     {
