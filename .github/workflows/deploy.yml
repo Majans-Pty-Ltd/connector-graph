@@ -43,3 +43,13 @@ jobs:
               GRAPH_CLIENT_SECRET="$GRAPH_CLIENT_SECRET" \
               GRAPH_API_KEY="$GRAPH_API_KEY" \
               PORT=8030
+
+  smoke-test:
+    needs: deploy
+    uses: Majans-Pty-Ltd/audit-heartbeat/.github/workflows/post-deploy-smoke.yml@main
+    with:
+      container_name: connector-graph
+      health_url: https://graph.majans.com/health
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
