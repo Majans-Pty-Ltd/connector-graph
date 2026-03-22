@@ -15,7 +15,7 @@ export const GRAPH_API_BASE = "https://graph.microsoft.com/v1.0/";
 
 // Managed Identity JWT auth (agent-to-connector via Azure MI)
 export const MANAGED_IDENTITY_ENABLED = process.env.MANAGED_IDENTITY_ENABLED === "true";
-export const MANAGED_IDENTITY_AUDIENCE = process.env.MANAGED_IDENTITY_AUDIENCE || "api://connector-graph";
+export const MANAGED_IDENTITY_AUDIENCE = process.env.MANAGED_IDENTITY_AUDIENCE || "api://b8157430-c8f3-4760-beaa-a4b95cfc20a7";
 
 export function validateConfig(): void {
   if (!GRAPH_TENANT_ID) {

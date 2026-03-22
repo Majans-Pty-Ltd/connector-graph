@@ -41,7 +41,7 @@ export function looksLikeJwt(token: string): boolean {
  * Validates a Managed Identity JWT issued by Azure AD.
  *
  * Expected claims:
- *   aud: api://connector-graph (or MANAGED_IDENTITY_AUDIENCE)
+ *   aud: api://b8157430-c8f3-4760-beaa-a4b95cfc20a7 (or MANAGED_IDENTITY_AUDIENCE)
  *   iss: https://login.microsoftonline.com/{tenant}/v2.0
  *   roles: ["MCP.Invoke"]
  *
