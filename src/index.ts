@@ -2,9 +2,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { validateConfig, GRAPH_CLIENT_ID, GRAPH_API_KEY } from "./utils/config.js";
+import { validateConfig, GRAPH_CLIENT_ID, GRAPH_API_KEY, MANAGED_IDENTITY_ENABLED } from "./utils/config.js";
 import { log, logError } from "./utils/logger.js";
 import { userTokenStorage } from "./utils/auth.js";
+import { looksLikeJwt, validateManagedIdentityToken } from "./utils/jwt-validator.js";
 import { GraphClient, isDelegatedAuth } from "./api/client.js";
 import { registerUserTools } from "./tools/users.js";
 import { registerGroupTools } from "./tools/groups.js";
@@ -156,22 +157,65 @@ async function startHttp(port: number): Promise<void> {
       return;
     }
 
-    // MCP endpoint — supports both delegated (Bearer) and app-only auth
+    // MCP endpoint — supports delegated (Bearer), Managed Identity (Bearer JWT), and app-only auth
     if (req.url === "/mcp" || req.url === "/") {
-      const userToken = extractBearerToken(req);
+      const bearerToken = extractBearerToken(req);
+      let userToken: string | undefined = undefined;
 
-      // If no Bearer token and API key is configured, require X-API-Key
-      if (!userToken && !validateApiKey(req)) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Invalid or missing X-API-Key header" }));
-        return;
-      }
+      if (bearerToken) {
+        // Bearer token present — determine if it's an MI JWT or a delegated user token
+        if (MANAGED_IDENTITY_ENABLED && looksLikeJwt(bearerToken)) {
+          try {
+            await validateManagedIdentityToken(bearerToken);
+            log("MCP request authenticated via Managed Identity JWT");
+            // MI path: do NOT store token in userTokenStorage — GraphClient uses SP fallback
+          } catch (miErr) {
+            // MI validation failed — check if this was clearly an MI token (not a delegated user token)
+            // MI tokens have `roles` claim and no `scp` claim; delegated tokens have `scp` claim
+            let isMiToken = false;
+            try {
+              const payloadB64 = bearerToken.split(".")[1];
+              const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+              isMiToken = payload.roles && !payload.scp;
+            } catch {
+              // Can't decode — treat as opaque delegated token
+            }
 
-      if (userToken) {
-        log("MCP request with delegated user token");
+            if (isMiToken) {
+              // Token was clearly an MI token but failed validation — check for API key fallback
+              if (validateApiKey(req)) {
+                log("MI JWT validation failed, falling back to valid X-API-Key auth");
+              } else {
+                logError("MI JWT validation failed and no valid X-API-Key", miErr as Error);
+                res.writeHead(401, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Invalid Managed Identity token and no valid X-API-Key" }));
+                return;
+              }
+            } else {
+              // Token looks like a delegated user token (has `scp` or undecodable) — existing path
+              log("Bearer token is not an MI JWT, treating as delegated user token");
+              userToken = bearerToken;
+            }
+          }
+        } else {
+          // MI not enabled or token doesn't look like a JWT — delegated user token
+          userToken = bearerToken;
+        }
+
+        if (userToken) {
+          log("MCP request with delegated user token");
+        }
+      } else {
+        // No Bearer token — require API key
+        if (!validateApiKey(req)) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid or missing X-API-Key header" }));
+          return;
+        }
       }
 
       // Run MCP handler inside AsyncLocalStorage context with the user's token
+      // For MI auth: userToken is undefined, so GraphClient falls back to SP token
       await userTokenStorage.run(userToken, async () => {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
