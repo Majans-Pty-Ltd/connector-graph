@@ -288,7 +288,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         const result = await client.get<GraphFileAttachment>(
           `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
           {
-            $select: "id,name,contentType,size,isInline,contentBytes",
+            $select: "id,name,contentType,size,isInline",
           }
         );
 
@@ -349,7 +349,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         const result = await client.get<GraphFileAttachment>(
           `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
           {
-            $select: "id,name,contentType,size,isInline,contentBytes",
+            $select: "id,name,contentType,size,isInline",
           }
         );
 
