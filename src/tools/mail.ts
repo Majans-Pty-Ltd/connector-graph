@@ -286,10 +286,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
     async ({ user_id, message_id, attachment_id }) => {
       try {
         const result = await client.get<GraphFileAttachment>(
-          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
-          {
-            $select: "id,name,contentType,size,isInline",
-          }
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`
         );
 
         const contentType = result.contentType ?? "";
@@ -347,10 +344,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
     async ({ user_id, message_id, attachment_id }) => {
       try {
         const result = await client.get<GraphFileAttachment>(
-          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`,
-          {
-            $select: "id,name,contentType,size,isInline",
-          }
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/attachments/${encodeURIComponent(attachment_id)}`
         );
 
         if (!result.contentBytes) {
