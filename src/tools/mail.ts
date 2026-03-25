@@ -566,4 +566,131 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
       }
     }
   );
+
+  // ── Move message to folder ──
+
+  server.tool(
+    "graph_move_mail",
+    "Move an email to a different folder. Use graph_list_mail_folders to get folder IDs. Common folders: 'DeletedItems', 'Archive', 'Inbox', 'Drafts', 'JunkEmail'.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN"),
+      message_id: z.string().describe("Message ID to move"),
+      destination_folder_id: z.string().describe("Destination folder ID (from graph_list_mail_folders) or well-known name: 'DeletedItems', 'Archive', 'Inbox', 'Drafts', 'JunkEmail', 'SentItems'"),
+    },
+    async ({ user_id, message_id, destination_folder_id }) => {
+      try {
+        const result = await client.post<{ id: string; parentFolderId: string }>(
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/move`,
+          { destinationId: destination_folder_id }
+        );
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              moved: true,
+              new_message_id: result.id,
+              destination_folder: destination_folder_id,
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error moving message: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ── Delete message ──
+
+  server.tool(
+    "graph_delete_mail",
+    "Delete an email. Moves to Deleted Items by default. Use permanently=true to hard-delete (skip Deleted Items).",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN"),
+      message_id: z.string().describe("Message ID to delete"),
+      permanently: z.boolean().optional().describe("Hard-delete permanently (default false — moves to Deleted Items)"),
+    },
+    async ({ user_id, message_id, permanently }) => {
+      try {
+        if (permanently) {
+          await client.delete(
+            `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}`
+          );
+        } else {
+          await client.post<unknown>(
+            `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/move`,
+            { destinationId: "DeletedItems" }
+          );
+        }
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              deleted: true,
+              permanent: permanently ?? false,
+              message_id,
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error deleting message: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ── Update message properties (read/unread, flag, importance, categories) ──
+
+  server.tool(
+    "graph_update_mail",
+    "Update email properties: mark as read/unread, flag for follow-up, set importance, or assign categories.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN"),
+      message_id: z.string().describe("Message ID to update"),
+      is_read: z.boolean().optional().describe("Mark as read (true) or unread (false)"),
+      importance: z.enum(["low", "normal", "high"]).optional().describe("Set importance level"),
+      flag_status: z.enum(["notFlagged", "flagged", "complete"]).optional().describe("Follow-up flag: 'flagged' to flag, 'complete' to mark done, 'notFlagged' to clear"),
+      categories: z.array(z.string()).optional().describe("Set category labels (e.g. ['Red category', 'Important']). Pass empty array to clear."),
+    },
+    async ({ user_id, message_id, is_read, importance, flag_status, categories }) => {
+      try {
+        const payload: Record<string, unknown> = {
+          ...(is_read !== undefined ? { isRead: is_read } : {}),
+          ...(importance ? { importance } : {}),
+          ...(flag_status ? { flag: { flagStatus: flag_status } } : {}),
+          ...(categories !== undefined ? { categories } : {}),
+        };
+
+        await client.patch<unknown>(
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}`,
+          payload
+        );
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              updated: true,
+              message_id,
+              changes: {
+                ...(is_read !== undefined ? { is_read } : {}),
+                ...(importance ? { importance } : {}),
+                ...(flag_status ? { flag_status } : {}),
+                ...(categories !== undefined ? { categories } : {}),
+              },
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error updating message: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
 }

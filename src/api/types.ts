@@ -297,6 +297,17 @@ export interface GraphChat {
   webUrl: string | null;
 }
 
+export interface GraphScheduleInfo {
+  scheduleId: string;
+  availabilityView: string;
+  scheduleItems: Array<{
+    status: string;
+    subject?: string;
+    start: { dateTime: string; timeZone: string };
+    end: { dateTime: string; timeZone: string };
+  }>;
+}
+
 export interface GraphChatMessage {
   id: string;
   createdDateTime: string;
