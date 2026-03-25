@@ -130,14 +130,14 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
 
   server.tool(
     "graph_create_draft",
-    "Create an Outlook draft email with optional file attachments. Draft is saved to the user's Drafts folder but NOT sent. Use this when the user wants to review before sending, or when attachments are needed.",
+    "Create an Outlook draft email with optional file attachments. Draft is saved to the user's Drafts folder but NOT sent. Use this when the user wants to review before sending, or when attachments are needed. To create an in-thread draft reply, provide reply_to_message_id — this uses createReplyAll to preserve the conversation thread and pre-populate recipients.",
     {
       sender: z.string().describe("Sender user ID (GUID) or UPN (e.g. amit@majans.com). Draft is created in this mailbox."),
       to: z.array(z.object({
         address: z.string().describe("Recipient email address"),
         name: z.string().optional().describe("Recipient display name"),
-      })).describe("To recipients (at least one required)"),
-      subject: z.string().describe("Email subject line"),
+      })).optional().describe("To recipients. Required for new drafts, optional for replies (defaults to reply-all recipients)."),
+      subject: z.string().optional().describe("Email subject line. Required for new drafts, optional for replies (defaults to RE: original subject)."),
       body: z.string().describe("Email body content (HTML or plain text)"),
       body_type: z.enum(["HTML", "Text"]).optional().describe("Body content type (default HTML)"),
       cc: z.array(z.object({
@@ -150,10 +150,11 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         content_base64: z.string().describe("Base64-encoded file content"),
         content_type: z.string().describe("MIME type (e.g. 'application/vnd.openxmlformats-officedocument.presentationml.presentation')"),
       })).optional().describe("File attachments (base64-encoded)"),
+      reply_to_message_id: z.string().optional().describe("Message ID to reply to. Creates an in-thread draft reply-all instead of a new draft. Recipients default to reply-all but can be overridden with to/cc."),
     },
-    async ({ sender, to, subject, body, body_type, cc, importance, attachments }) => {
+    async ({ sender, to, subject, body, body_type, cc, importance, attachments, reply_to_message_id }) => {
       try {
-        const toRecipients: GraphSendMailRecipient[] = to.map(r => ({
+        const toRecipients: GraphSendMailRecipient[] | undefined = to?.map(r => ({
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
         }));
 
@@ -161,28 +162,61 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
         }));
 
-        const payload: Record<string, unknown> = {
-          subject,
-          body: { contentType: body_type ?? "HTML", content: body },
-          toRecipients,
-          ...(ccRecipients ? { ccRecipients } : {}),
-          ...(importance ? { importance } : {}),
-          ...(attachments && attachments.length > 0 ? {
-            attachments: attachments.map(a => ({
-              "@odata.type": "#microsoft.graph.fileAttachment",
-              name: a.filename,
-              contentBytes: a.content_base64,
-              contentType: a.content_type,
-            })),
-          } : {}),
-        };
+        let result: { id: string; subject: string; webLink?: string };
 
-        const result = await client.post<{ id: string; subject: string; webLink?: string }>(
-          `users/${encodeURIComponent(sender)}/messages`,
-          payload
-        );
+        if (reply_to_message_id) {
+          // Create in-thread draft reply-all
+          const message: Record<string, unknown> = {
+            body: { contentType: body_type ?? "HTML", content: body },
+            ...(toRecipients ? { toRecipients } : {}),
+            ...(ccRecipients ? { ccRecipients } : {}),
+            ...(subject ? { subject } : {}),
+            ...(importance ? { importance } : {}),
+          };
 
-        const recipientList = to.map(r => r.address).join(", ");
+          result = await client.post<{ id: string; subject: string; webLink?: string }>(
+            `users/${encodeURIComponent(sender)}/messages/${encodeURIComponent(reply_to_message_id)}/createReplyAll`,
+            { message }
+          );
+        } else {
+          // Create new draft
+          if (!to || to.length === 0) {
+            return {
+              content: [{ type: "text" as const, text: "Error: 'to' recipients are required for new drafts." }],
+              isError: true,
+            };
+          }
+
+          const payload: Record<string, unknown> = {
+            subject: subject ?? "",
+            body: { contentType: body_type ?? "HTML", content: body },
+            toRecipients,
+            ...(ccRecipients ? { ccRecipients } : {}),
+            ...(importance ? { importance } : {}),
+          };
+
+          result = await client.post<{ id: string; subject: string; webLink?: string }>(
+            `users/${encodeURIComponent(sender)}/messages`,
+            payload
+          );
+        }
+
+        // Add attachments to the draft if any
+        if (attachments && attachments.length > 0) {
+          for (const a of attachments) {
+            await client.post<unknown>(
+              `users/${encodeURIComponent(sender)}/messages/${encodeURIComponent(result.id)}/attachments`,
+              {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                name: a.filename,
+                contentBytes: a.content_base64,
+                contentType: a.content_type,
+              }
+            );
+          }
+        }
+
+        const recipientList = to?.map(r => r.address).join(", ") ?? "(reply-all recipients)";
         return {
           content: [
             {
@@ -190,10 +224,11 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
               text: JSON.stringify(
                 {
                   created: true,
+                  is_reply: !!reply_to_message_id,
                   draft_id: result.id,
                   from: sender,
                   to: recipientList,
-                  subject,
+                  subject: result.subject ?? subject ?? "",
                   attachment_count: attachments?.length ?? 0,
                   ...(result.webLink ? { web_link: result.webLink } : {}),
                 },
