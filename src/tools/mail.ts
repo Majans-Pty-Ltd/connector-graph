@@ -498,4 +498,43 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
       }
     }
   );
+
+  server.tool(
+    "graph_reply_mail",
+    "Reply to an email in-thread. The reply is sent from the user's mailbox and preserves the conversation thread. Use message_id from graph_search_mail or graph_list_folder_messages.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com). Reply is sent from this mailbox."),
+      message_id: z.string().describe("Message ID of the email to reply to (from graph_search_mail)"),
+      comment: z.string().describe("Reply body content (HTML supported)"),
+    },
+    async ({ user_id, message_id, comment }) => {
+      try {
+        await client.post<void>(
+          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/reply`,
+          { comment }
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  replied: true,
+                  from: user_id,
+                  in_reply_to: message_id,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error replying: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
 }
