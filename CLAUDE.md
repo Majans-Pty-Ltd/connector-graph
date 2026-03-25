@@ -247,8 +247,11 @@ docker run -p 8030:8030 \
 | Container Registry | `acrmajansagents.azurecr.io` |
 | Environment | `cae-majans-agents` (Australia East) |
 | Container App | `connector-graph` (external ingress, port 8030) |
+| Custom Domain | `graph.majans.com` (CNAME in cPanel + MJS-AZURE-DC01) |
 | CI/CD | `.github/workflows/deploy.yml` -- push to master -> ACR build -> Container Apps update |
 | Secrets | 1Password via `1password/load-secrets-action@v2` at deploy time |
+
+**DNS note**: Custom domain requires CNAMEs in both cPanel (public DNS) and MJS-AZURE-DC01 (corporate AD DNS). See workspace `CLAUDE.md` > "Custom Domain DNS" for commands.
 
 ### GitHub Org Secrets Required
 

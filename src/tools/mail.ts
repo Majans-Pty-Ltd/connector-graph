@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphClient } from "../api/client.js";
-import type { GraphMailMessage, GraphMailMessageFull, GraphAttachment, GraphFileAttachment, GraphSendMailRecipient, ODataResponse } from "../api/types.js";
+import type { GraphMailMessage, GraphMailMessageFull, GraphMailFolder, GraphAttachment, GraphFileAttachment, GraphSendMailRecipient, ODataResponse } from "../api/types.js";
 import { extractContent } from "../utils/content-extractor.js";
 
 const MAIL_SELECT = "id,subject,bodyPreview,from,toRecipients,receivedDateTime,isRead,hasAttachments,importance";
@@ -392,6 +392,97 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   extractedText: extraction.extractedText,
                   format: extraction.format,
                   ...(extraction.metadata ? { metadata: extraction.metadata } : {}),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "graph_list_mail_folders",
+    "List mail folders for a user (Inbox, Sent Items, Drafts, Archive, etc.). Returns folder IDs, display names, and unread/total item counts.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com)"),
+      top: z.number().optional().describe("Max folders to return (default 50)"),
+    },
+    async ({ user_id, top }) => {
+      try {
+        const result = await client.get<ODataResponse<GraphMailFolder>>(
+          `users/${encodeURIComponent(user_id)}/mailFolders`,
+          {
+            $select: "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount",
+            $top: String(top ?? 50),
+          }
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  count: result.value.length,
+                  folders: result.value,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "graph_list_folder_messages",
+    "List messages from a specific mail folder. Use well-known folder names (inbox, sentitems, drafts, archive, deleteditems, junkemail) or a folder ID from graph_list_mail_folders. Supports OData $filter and $search.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com)"),
+      folder: z.string().describe("Well-known folder name (inbox, sentitems, drafts, archive, deleteditems, junkemail) or folder ID (GUID)"),
+      search: z.string().optional().describe("Free-text search query (e.g. 'invoice')"),
+      filter: z.string().optional().describe("OData $filter (e.g. \"receivedDateTime ge 2024-01-01\")"),
+      top: z.number().optional().describe("Max results to return (default 25, max 100)"),
+      orderby: z.string().optional().describe("OData $orderby (default 'receivedDateTime desc')"),
+    },
+    async ({ user_id, folder, search, filter, top, orderby }) => {
+      try {
+        const params: Record<string, string> = {
+          $select: MAIL_SELECT,
+          $top: String(top ?? 25),
+          $orderby: orderby ?? "receivedDateTime desc",
+        };
+        if (search) params.$search = `"${search}"`;
+        if (filter) params.$filter = filter;
+
+        const result = await client.get<ODataResponse<GraphMailMessage>>(
+          `users/${encodeURIComponent(user_id)}/mailFolders/${encodeURIComponent(folder)}/messages`,
+          params
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  folder,
+                  count: result.value.length,
+                  has_more: !!result["@odata.nextLink"],
+                  messages: result.value,
                 },
                 null,
                 2

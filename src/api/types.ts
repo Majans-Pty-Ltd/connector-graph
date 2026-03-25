@@ -97,6 +97,15 @@ export interface GraphFileAttachment extends GraphAttachment {
   contentBytes: string;  // base64-encoded content
 }
 
+export interface GraphMailFolder {
+  id: string;
+  displayName: string;
+  parentFolderId: string;
+  childFolderCount: number;
+  unreadItemCount: number;
+  totalItemCount: number;
+}
+
 export interface GraphDriveItem {
   id: string;
   name: string;
