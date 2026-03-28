@@ -19,7 +19,6 @@ export function registerTeamsTools(server: McpServer, client: GraphClient): void
       try {
         const params: Record<string, string> = {
           $top: String(top ?? 50),
-          $orderby: "lastUpdatedDateTime desc",
           $select: "id,topic,chatType,createdDateTime,lastUpdatedDateTime,webUrl",
         };
         if (chat_type) {
