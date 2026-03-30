@@ -18,6 +18,17 @@ import { registerPlannerTools } from "./tools/planner.js";
 import { registerTodoTools } from "./tools/todo.js";
 import { registerTeamsTools } from "./tools/teams.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { z, type ZodRawShape } from "zod";
+
+// ── Tool handler registry (populated by intercepting server.tool() calls) ────
+// Stores each tool's zod schema + handler so /call-tool can invoke tools
+// directly without going through the MCP protocol.
+type ToolHandler = (args: Record<string, unknown>) => Promise<any>;
+interface RegisteredTool {
+  schema: ZodRawShape;
+  handler: ToolHandler;
+}
+const toolHandlers = new Map<string, RegisteredTool>();
 
 function createMcpServer(): McpServer {
   const client = new GraphClient();
@@ -26,6 +37,13 @@ function createMcpServer(): McpServer {
     name: "graph",
     version: "2.0.0",
   });
+
+  // Intercept server.tool() to capture registrations in toolHandlers
+  const originalTool = server.tool.bind(server);
+  (server as any).tool = (name: string, description: string, schema: ZodRawShape, handler: ToolHandler) => {
+    toolHandlers.set(name, { schema, handler });
+    return originalTool(name, description, schema, handler);
+  };
 
   // Auth status tool — reports whether running as delegated user or SP
   server.tool(
@@ -149,11 +167,105 @@ async function startStdio(): Promise<void> {
 }
 
 async function startHttp(port: number): Promise<void> {
+  // Create once at startup to populate the toolHandlers registry.
+  // Per-request MCP sessions create their own servers, but the registry
+  // is module-level and only needs to be filled once.
+  createMcpServer();
+
   const httpServer = createServer(async (req, res) => {
     // Health check
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", transport: "streamable-http" }));
+      return;
+    }
+
+    // ── GET /tools — list all registered tool names ──────────────────────
+    if (req.method === "GET" && req.url === "/tools") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ tools: Array.from(toolHandlers.keys()) }));
+      return;
+    }
+
+    // ── POST /call-tool — invoke a tool directly via REST ──────────────
+    if (req.method === "POST" && req.url === "/call-tool") {
+      // Auth: require Bearer token (delegated) OR X-API-Key (app-only)
+      const bearerToken = extractBearerToken(req);
+      let userToken: string | undefined = undefined;
+
+      if (bearerToken) {
+        userToken = bearerToken;
+      } else if (!validateApiKey(req)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid or missing auth. Provide Authorization: Bearer <token> or X-API-Key header." }));
+        return;
+      }
+
+      // Parse request body
+      let body: string;
+      try {
+        body = await new Promise<string>((resolve, reject) => {
+          const chunks: Buffer[] = [];
+          req.on("data", (chunk: Buffer) => chunks.push(chunk));
+          req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+          req.on("error", reject);
+        });
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to read request body" }));
+        return;
+      }
+
+      let parsed: { name?: string; arguments?: Record<string, unknown> };
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON in request body" }));
+        return;
+      }
+
+      const toolName = parsed.name;
+      const toolArgs = parsed.arguments ?? {};
+
+      if (!toolName || typeof toolName !== "string") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing or invalid 'name' field in request body" }));
+        return;
+      }
+
+      const registered = toolHandlers.get(toolName);
+      if (!registered) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `Unknown tool: ${toolName}`, available: Array.from(toolHandlers.keys()) }));
+        return;
+      }
+
+      // Validate arguments against the tool's zod schema
+      let validatedArgs: Record<string, unknown>;
+      try {
+        const zodSchema = z.object(registered.schema);
+        validatedArgs = zodSchema.parse(toolArgs);
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid tool arguments", details: (err as Error).message }));
+        return;
+      }
+
+      // Execute the tool inside the correct auth context
+      try {
+        const result = await userTokenStorage.run(userToken, async () => {
+          return await registered.handler(validatedArgs);
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          content: [{ type: "text", text: `Tool execution error: ${(err as Error).message}` }],
+          isError: true,
+        }));
+      }
       return;
     }
 
@@ -235,12 +347,14 @@ async function startHttp(port: number): Promise<void> {
 
     // 404 for everything else
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found. Use /mcp for MCP or /health for health check." }));
+    res.end(JSON.stringify({ error: "Not found. Use /mcp for MCP, /call-tool for REST, /tools for tool list, or /health for health check." }));
   });
 
   httpServer.listen(port, () => {
     log(`Graph MCP server started (StreamableHTTP on port ${port})`);
     log(`  MCP endpoint: http://localhost:${port}/mcp`);
+    log(`  REST /tools:  http://localhost:${port}/tools`);
+    log(`  REST /call-tool: http://localhost:${port}/call-tool`);
     log(`  Health check: http://localhost:${port}/health`);
     log(`  Auth modes: delegated (Bearer token) + app-only (X-API-Key / SP)`);
   });
