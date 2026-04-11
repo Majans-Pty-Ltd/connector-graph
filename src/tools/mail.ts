@@ -22,9 +22,13 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         const params: Record<string, string> = {
           $select: MAIL_SELECT,
           $top: String(top ?? 25),
-          $orderby: orderby ?? "receivedDateTime desc",
         };
-        if (search) params.$search = `"${search}"`;
+        // Graph API does not support $orderby with $search
+        if (search) {
+          params.$search = `"${search}"`;
+        } else {
+          params.$orderby = orderby ?? "receivedDateTime desc";
+        }
         if (filter) params.$filter = filter;
 
         const result = await client.get<ODataResponse<GraphMailMessage>>(
@@ -478,6 +482,47 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
   );
 
   server.tool(
+    "graph_list_child_folders",
+    "List child (sub) folders of a specific mail folder. Use a folder ID from graph_list_mail_folders to get its subfolders.",
+    {
+      user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com)"),
+      folder_id: z.string().describe("Parent folder ID (from graph_list_mail_folders)"),
+      top: z.number().optional().describe("Max folders to return (default 100)"),
+    },
+    async ({ user_id, folder_id, top }) => {
+      try {
+        const result = await client.get<ODataResponse<GraphMailFolder>>(
+          `users/${encodeURIComponent(user_id)}/mailFolders/${encodeURIComponent(folder_id)}/childFolders`,
+          {
+            $select: "id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount",
+            $top: String(top ?? 100),
+          }
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  count: result.value.length,
+                  folders: result.value,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "graph_list_folder_messages",
     "List messages from a specific mail folder. Use well-known folder names (inbox, sentitems, drafts, archive, deleteditems, junkemail) or a folder ID from graph_list_mail_folders. Supports OData $filter and $search.",
     {
@@ -493,9 +538,13 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         const params: Record<string, string> = {
           $select: MAIL_SELECT,
           $top: String(top ?? 25),
-          $orderby: orderby ?? "receivedDateTime desc",
         };
-        if (search) params.$search = `"${search}"`;
+        // Graph API does not support $orderby with $search
+        if (search) {
+          params.$search = `"${search}"`;
+        } else {
+          params.$orderby = orderby ?? "receivedDateTime desc";
+        }
         if (filter) params.$filter = filter;
 
         const result = await client.get<ODataResponse<GraphMailMessage>>(
