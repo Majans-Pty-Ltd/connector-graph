@@ -62,7 +62,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
 
   server.tool(
     "graph_send_mail",
-    "Send an email on behalf of a user via Microsoft Graph API. Requires Mail.Send application permission. Supports HTML or plain text body, multiple recipients, CC, and importance level.",
+    "Send an email on behalf of a user via Microsoft Graph API. Requires Mail.Send application permission. Supports HTML or plain text body, multiple recipients, CC, importance level, and file attachments. NOTE: each attachment is limited to ~4MB via /sendMail (Graph total request limit). For larger files use graph_create_draft + the createUploadSession API.",
     {
       sender: z.string().describe("Sender user ID (GUID) or UPN (e.g. amit@majans.com). The email is sent from this mailbox."),
       to: z.array(z.object({
@@ -78,8 +78,17 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
       })).optional().describe("CC recipients"),
       importance: z.enum(["low", "normal", "high"]).optional().describe("Email importance (default normal)"),
       save_to_sent: z.boolean().optional().describe("Save to Sent Items (default true)"),
+      attachments: z.array(z.object({
+        name: z.string().describe("Attachment filename (e.g. 'report.pdf')"),
+        contentBytes: z.string().describe("Base64-encoded file content"),
+        contentType: z.string().optional().describe("MIME type (e.g. 'application/pdf'). Optional — Graph infers from filename if omitted."),
+      })).optional().describe("File attachments. Each attachment ≤4MB; total request must stay under Graph's ~4MB /sendMail limit. For larger files, use graph_create_draft and the upload session API."),
+      internet_message_headers: z.array(z.object({
+        name: z.string().describe("Header name. Microsoft Graph requires custom headers to start with 'X-' (e.g. 'X-Majans-Workflow')."),
+        value: z.string().describe("Header value (string). Long values are accepted but may be truncated by some mail clients."),
+      })).optional().describe("Custom internet message headers (RFC 5322 / SMTP). Used for email provenance tracking — e.g. X-Majans-Workflow, X-Majans-Run-Id, X-Majans-Repo. Only X-prefixed names are accepted by Graph for custom headers."),
     },
-    async ({ sender, to, subject, body, body_type, cc, importance, save_to_sent }) => {
+    async ({ sender, to, subject, body, body_type, cc, importance, save_to_sent, attachments, internet_message_headers }) => {
       try {
         const toRecipients: GraphSendMailRecipient[] = to.map(r => ({
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
@@ -89,6 +98,18 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
         }));
 
+        const graphAttachments = attachments?.map(a => ({
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: a.name,
+          contentBytes: a.contentBytes,
+          ...(a.contentType ? { contentType: a.contentType } : {}),
+        }));
+
+        const internetMessageHeaders = internet_message_headers?.map(h => ({
+          name: h.name,
+          value: h.value,
+        }));
+
         const payload: Record<string, unknown> = {
           message: {
             subject,
@@ -96,6 +117,8 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
             toRecipients,
             ...(ccRecipients ? { ccRecipients } : {}),
             ...(importance ? { importance } : {}),
+            ...(graphAttachments && graphAttachments.length > 0 ? { attachments: graphAttachments } : {}),
+            ...(internetMessageHeaders && internetMessageHeaders.length > 0 ? { internetMessageHeaders } : {}),
           },
           saveToSentItems: save_to_sent ?? true,
         };
@@ -116,6 +139,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   from: sender,
                   to: recipientList,
                   subject,
+                  attachment_count: attachments?.length ?? 0,
                 },
                 null,
                 2
@@ -150,10 +174,10 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
       })).optional().describe("CC recipients"),
       importance: z.enum(["low", "normal", "high"]).optional().describe("Email importance (default normal)"),
       attachments: z.array(z.object({
-        filename: z.string().describe("Attachment filename (e.g. 'report.pdf')"),
-        content_base64: z.string().describe("Base64-encoded file content"),
-        content_type: z.string().describe("MIME type (e.g. 'application/vnd.openxmlformats-officedocument.presentationml.presentation')"),
-      })).optional().describe("File attachments (base64-encoded)"),
+        name: z.string().describe("Attachment filename (e.g. 'report.pdf')"),
+        contentBytes: z.string().describe("Base64-encoded file content"),
+        contentType: z.string().optional().describe("MIME type (e.g. 'application/pdf'). Optional — Graph infers from filename if omitted."),
+      })).optional().describe("File attachments (base64-encoded). Each attachment ≤3MB when added via /messages/{id}/attachments. For larger files, use the createUploadSession API."),
       reply_to_message_id: z.string().optional().describe("Message ID to reply to. Creates an in-thread draft reply-all instead of a new draft. Recipients default to reply-all but can be overridden with to/cc."),
     },
     async ({ sender, to, subject, body, body_type, cc, importance, attachments, reply_to_message_id }) => {
@@ -212,9 +236,9 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
               `users/${encodeURIComponent(sender)}/messages/${encodeURIComponent(result.id)}/attachments`,
               {
                 "@odata.type": "#microsoft.graph.fileAttachment",
-                name: a.filename,
-                contentBytes: a.content_base64,
-                contentType: a.content_type,
+                name: a.name,
+                contentBytes: a.contentBytes,
+                ...(a.contentType ? { contentType: a.contentType } : {}),
               }
             );
           }
@@ -579,18 +603,50 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
 
   server.tool(
     "graph_reply_mail",
-    "Reply to an email in-thread. The reply is sent from the user's mailbox and preserves the conversation thread. Use message_id from graph_search_mail or graph_list_folder_messages.",
+    "Reply to an email in-thread. The reply is sent from the user's mailbox and preserves the conversation thread. Use message_id from graph_search_mail or graph_list_folder_messages. Supports optional file attachments — when provided, uses createReply (draft) → add attachments → send. Each attachment ≤3MB; for larger files use graph_create_draft + the createUploadSession API.",
     {
       user_id: z.string().describe("User ID (GUID) or UPN (e.g. amit@majans.com). Reply is sent from this mailbox."),
       message_id: z.string().describe("Message ID of the email to reply to (from graph_search_mail)"),
       comment: z.string().describe("Reply body content (HTML supported)"),
+      attachments: z.array(z.object({
+        name: z.string().describe("Attachment filename (e.g. 'report.pdf')"),
+        contentBytes: z.string().describe("Base64-encoded file content"),
+        contentType: z.string().optional().describe("MIME type (e.g. 'application/pdf'). Optional — Graph infers from filename if omitted."),
+      })).optional().describe("File attachments. Each ≤3MB. When provided, the reply is built as a draft (createReply) so attachments can be added before sending."),
     },
-    async ({ user_id, message_id, comment }) => {
+    async ({ user_id, message_id, comment, attachments }) => {
       try {
-        await client.post<void>(
-          `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/reply`,
-          { comment }
-        );
+        if (attachments && attachments.length > 0) {
+          // Draft-based flow: createReply → add attachments → send.
+          // /reply doesn't accept attachments inline, so we have to materialise the draft first.
+          const draft = await client.post<{ id: string }>(
+            `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/createReply`,
+            { comment }
+          );
+
+          for (const a of attachments) {
+            await client.post<unknown>(
+              `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(draft.id)}/attachments`,
+              {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                name: a.name,
+                contentBytes: a.contentBytes,
+                ...(a.contentType ? { contentType: a.contentType } : {}),
+              }
+            );
+          }
+
+          await client.post<void>(
+            `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(draft.id)}/send`,
+            {}
+          );
+        } else {
+          await client.post<void>(
+            `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/reply`,
+            { comment }
+          );
+        }
+
         return {
           content: [
             {
@@ -600,6 +656,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   replied: true,
                   from: user_id,
                   in_reply_to: message_id,
+                  attachment_count: attachments?.length ?? 0,
                 },
                 null,
                 2
