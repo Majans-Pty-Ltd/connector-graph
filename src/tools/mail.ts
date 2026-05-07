@@ -6,6 +6,26 @@ import { extractContent } from "../utils/content-extractor.js";
 
 const MAIL_SELECT = "id,subject,bodyPreview,from,toRecipients,receivedDateTime,isRead,hasAttachments,importance";
 
+// Zod shape for an @mention entry — used by send_mail, create_draft, reply_mail.
+const mentionShape = z.object({
+  address: z.string().describe("Email address of the person being mentioned"),
+  name: z.string().optional().describe("Display name (recommended — appears next to the @ in Outlook)"),
+});
+
+// Convert input mentions to Microsoft Graph payload format.
+// Body must contain matching @Name text (HTML) for Outlook to render the highlight.
+type MentionInput = { address: string; name?: string };
+function toGraphMentions(input: MentionInput[] | undefined): Array<Record<string, unknown>> | undefined {
+  if (!input || input.length === 0) return undefined;
+  return input.map(m => ({
+    "@odata.type": "#microsoft.graph.mention",
+    mentioned: {
+      address: m.address,
+      ...(m.name ? { name: m.name } : {}),
+    },
+  }));
+}
+
 export function registerMailTools(server: McpServer, client: GraphClient): void {
   server.tool(
     "graph_search_mail",
@@ -87,8 +107,9 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         name: z.string().describe("Header name. Microsoft Graph requires custom headers to start with 'X-' (e.g. 'X-Majans-Workflow')."),
         value: z.string().describe("Header value (string). Long values are accepted but may be truncated by some mail clients."),
       })).optional().describe("Custom internet message headers (RFC 5322 / SMTP). Used for email provenance tracking — e.g. X-Majans-Workflow, X-Majans-Run-Id, X-Majans-Repo. Only X-prefixed names are accepted by Graph for custom headers."),
+      mentions: z.array(mentionShape).optional().describe("@mentions in the email body. Each mention attaches to the message metadata so Outlook renders the @Name highlight, fires a notification badge for the mentioned user, and the recipient can filter their inbox by '@me'. The body MUST contain matching @Name text (e.g. '@Phoebe Zhai') for the highlight to render — the connector does not insert it for you."),
     },
-    async ({ sender, to, subject, body, body_type, cc, importance, save_to_sent, attachments, internet_message_headers }) => {
+    async ({ sender, to, subject, body, body_type, cc, importance, save_to_sent, attachments, internet_message_headers, mentions }) => {
       try {
         const toRecipients: GraphSendMailRecipient[] = to.map(r => ({
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
@@ -110,6 +131,8 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
           value: h.value,
         }));
 
+        const graphMentions = toGraphMentions(mentions);
+
         const payload: Record<string, unknown> = {
           message: {
             subject,
@@ -119,6 +142,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
             ...(importance ? { importance } : {}),
             ...(graphAttachments && graphAttachments.length > 0 ? { attachments: graphAttachments } : {}),
             ...(internetMessageHeaders && internetMessageHeaders.length > 0 ? { internetMessageHeaders } : {}),
+            ...(graphMentions ? { mentions: graphMentions } : {}),
           },
           saveToSentItems: save_to_sent ?? true,
         };
@@ -140,6 +164,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   to: recipientList,
                   subject,
                   attachment_count: attachments?.length ?? 0,
+                  mention_count: mentions?.length ?? 0,
                 },
                 null,
                 2
@@ -179,8 +204,9 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         contentType: z.string().optional().describe("MIME type (e.g. 'application/pdf'). Optional — Graph infers from filename if omitted."),
       })).optional().describe("File attachments (base64-encoded). Each attachment ≤3MB when added via /messages/{id}/attachments. For larger files, use the createUploadSession API."),
       reply_to_message_id: z.string().optional().describe("Message ID to reply to. Creates an in-thread draft reply-all instead of a new draft. Recipients default to reply-all but can be overridden with to/cc."),
+      mentions: z.array(mentionShape).optional().describe("@mentions in the email body. Each mention attaches to the message metadata so Outlook renders the @Name highlight, fires a notification badge for the mentioned user, and the recipient can filter their inbox by '@me'. The body MUST contain matching @Name text (e.g. '@Phoebe Zhai') for the highlight to render — the connector does not insert it for you."),
     },
-    async ({ sender, to, subject, body, body_type, cc, importance, attachments, reply_to_message_id }) => {
+    async ({ sender, to, subject, body, body_type, cc, importance, attachments, reply_to_message_id, mentions }) => {
       try {
         const toRecipients: GraphSendMailRecipient[] | undefined = to?.map(r => ({
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
@@ -189,6 +215,8 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         const ccRecipients: GraphSendMailRecipient[] | undefined = cc?.map(r => ({
           emailAddress: { address: r.address, ...(r.name ? { name: r.name } : {}) },
         }));
+
+        const graphMentions = toGraphMentions(mentions);
 
         let result: { id: string; subject: string; webLink?: string };
 
@@ -200,6 +228,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
             ...(ccRecipients ? { ccRecipients } : {}),
             ...(subject ? { subject } : {}),
             ...(importance ? { importance } : {}),
+            ...(graphMentions ? { mentions: graphMentions } : {}),
           };
 
           result = await client.post<{ id: string; subject: string; webLink?: string }>(
@@ -221,6 +250,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
             toRecipients,
             ...(ccRecipients ? { ccRecipients } : {}),
             ...(importance ? { importance } : {}),
+            ...(graphMentions ? { mentions: graphMentions } : {}),
           };
 
           result = await client.post<{ id: string; subject: string; webLink?: string }>(
@@ -258,6 +288,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   to: recipientList,
                   subject: result.subject ?? subject ?? "",
                   attachment_count: attachments?.length ?? 0,
+                  mention_count: mentions?.length ?? 0,
                   ...(result.webLink ? { web_link: result.webLink } : {}),
                 },
                 null,
@@ -613,27 +644,38 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
         contentBytes: z.string().describe("Base64-encoded file content"),
         contentType: z.string().optional().describe("MIME type (e.g. 'application/pdf'). Optional — Graph infers from filename if omitted."),
       })).optional().describe("File attachments. Each ≤3MB. When provided, the reply is built as a draft (createReply) so attachments can be added before sending."),
+      mentions: z.array(mentionShape).optional().describe("@mentions in the reply body. Each mention attaches to the message metadata so Outlook renders the @Name highlight, fires a notification badge for the mentioned user, and the recipient can filter their inbox by '@me'. The comment body MUST contain matching @Name text (e.g. '@Phoebe Zhai') for the highlight to render — the connector does not insert it for you. When provided, the reply is built as a draft (createReply) so mentions can be set before sending."),
     },
-    async ({ user_id, message_id, comment, attachments }) => {
+    async ({ user_id, message_id, comment, attachments, mentions }) => {
       try {
-        if (attachments && attachments.length > 0) {
-          // Draft-based flow: createReply → add attachments → send.
-          // /reply doesn't accept attachments inline, so we have to materialise the draft first.
+        const graphMentions = toGraphMentions(mentions);
+        const useDraftFlow = (attachments && attachments.length > 0) || !!graphMentions;
+
+        if (useDraftFlow) {
+          // Draft-based flow: createReply → modify draft → send.
+          // /reply doesn't accept attachments or mentions inline, so we materialise the draft first.
+          const createReplyPayload: Record<string, unknown> = { comment };
+          if (graphMentions) {
+            createReplyPayload.message = { mentions: graphMentions };
+          }
+
           const draft = await client.post<{ id: string }>(
             `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(message_id)}/createReply`,
-            { comment }
+            createReplyPayload
           );
 
-          for (const a of attachments) {
-            await client.post<unknown>(
-              `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(draft.id)}/attachments`,
-              {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                name: a.name,
-                contentBytes: a.contentBytes,
-                ...(a.contentType ? { contentType: a.contentType } : {}),
-              }
-            );
+          if (attachments && attachments.length > 0) {
+            for (const a of attachments) {
+              await client.post<unknown>(
+                `users/${encodeURIComponent(user_id)}/messages/${encodeURIComponent(draft.id)}/attachments`,
+                {
+                  "@odata.type": "#microsoft.graph.fileAttachment",
+                  name: a.name,
+                  contentBytes: a.contentBytes,
+                  ...(a.contentType ? { contentType: a.contentType } : {}),
+                }
+              );
+            }
           }
 
           await client.post<void>(
@@ -657,6 +699,7 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
                   from: user_id,
                   in_reply_to: message_id,
                   attachment_count: attachments?.length ?? 0,
+                  mention_count: mentions?.length ?? 0,
                 },
                 null,
                 2
