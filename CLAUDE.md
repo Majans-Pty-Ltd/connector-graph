@@ -158,25 +158,61 @@ Use 1Password: `op run --env-file=.env.template -- npm start`
 Two auth paths coexist on the same server. Tool functions are identical — auth switching is transparent.
 
 ```
-Majans Users (Claude Code)              Agents (Container Apps)
-        │                                    │
-        │ MSAL device-code flow              │ Service Principal
-        │ (get-user-token.py)                │ (client credentials)
-        ▼                                    ▼
-    /mcp endpoint                        /mcp endpoint
-    Authorization: Bearer <user_token>   X-API-Key header (no Bearer)
-    Graph sees the user's identity       Graph sees SP identity
-    User only accesses own data          SP has full tenant access
+Majans Users (Claude Code)         Anthropic Managed Agents      Agents (Container Apps)
+        │                          (vault credential)                    │
+        │ MSAL device-code flow             │                            │ Service Principal
+        │ (get-user-token.py)               │                            │ (client credentials)
+        ▼                                   ▼                            ▼
+    /mcp endpoint                     /mcp endpoint                 /mcp or /call-tool
+    Authorization: Bearer <token>     Authorization: Bearer <token> X-API-Key header
+    Graph sees the user's identity    (same path — vault token)     Graph sees SP identity
+    User only accesses own data                                     SP has full tenant access
 ```
+
+### Auth Precedence
+
+`authenticateRequest` (in `src/utils/auth.ts`) applies these rules to every `/mcp` and `/call-tool` request:
+
+1. **`X-API-Key` (highest)** — agent path, SP token. If present it must match — no silent fall-through.
+2. **`Authorization: Bearer <MI JWT>`** (when `MANAGED_IDENTITY_ENABLED=true`) — Container App MI calls. Validated against Azure AD JWKS for `api://b8157430-...`.
+3. **`Authorization: Bearer <vault/user token>`** — delegated user tokens AND Anthropic Managed Agents Vault tokens. Validated by claim checks (`iss`, `aud`, `appid`/`azp`, `exp`).
+
+### Why the Graph token signature is NOT verified
+
+Microsoft Graph access tokens cannot be signature-validated by third parties — Microsoft inserts a hashed `nonce` into the JWT header before signing, and explicitly states:
+
+> *"Don't write any code that depends on the ability to validate the signature of an access token in your API implementations."*
+> — [Validate tokens](https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens#validate-tokens)
+
+So the validator does **claim-only** verification: `iss`, `aud`, `appid` allow-list, `exp`. The downstream Graph API call is the real auth gate — Graph rejects forged tokens regardless of what we accept here. Validation here filters obviously-invalid tokens before they reach Graph (saves a round trip and surfaces a 401 with a clearer error message).
+
+For comparison: connector-d365 and connector-fabric DO verify token signatures because their tokens (D365 OData, Power BI XMLA) don't have the nonce-hashing quirk.
 
 ### How It Works
 
-1. **HTTP request arrives** at `/mcp`
-2. `index.ts` checks for `Authorization: Bearer` header
-3. If present → stores user token in `AsyncLocalStorage` (per-request context)
-4. If absent → validates `X-API-Key` header (agent path)
-5. `GraphClient.getToken()` checks `AsyncLocalStorage` first, falls back to SP token
-6. Graph API enforces permissions based on whichever token is used
+1. **HTTP request arrives** at `/mcp` or `/call-tool`
+2. `authenticateRequest` checks X-API-Key first, then Bearer (with MI then vault validation)
+3. On success: user token (if any) is stored in `AsyncLocalStorage` for the request's lifetime
+4. `GraphClient.getToken()` checks `AsyncLocalStorage` first, falls back to SP token
+5. Graph API enforces permissions based on whichever token is used
+
+### Configuration
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `VAULT_BEARER_AUTH_ENABLED` | `true` | Strict claim-validation of Bearer tokens. Set to `false` to fall back to legacy passthrough (debug only). |
+| `VAULT_ALLOWED_APP_IDS` | `02fa0ea1-...` (Graph-MCP-User) | Comma-separated allow-list of Entra app IDs that may issue accepted Bearer tokens. |
+| `MANAGED_IDENTITY_ENABLED` | `false` | Enable Container App Managed Identity JWT validation (full signature check). |
+| `MANAGED_IDENTITY_AUDIENCE` | `api://b8157430-...` | Expected MI token audience. |
+
+### Verification
+
+```bash
+npm run build
+GRAPH_TENANT_ID=d54794b1-f598-4c0f-a276-6039a39774ac \
+  GRAPH_API_KEY=server-api-key \
+  node test-vault-auth.mjs
+```
 
 ### Auth Mode Detection
 
