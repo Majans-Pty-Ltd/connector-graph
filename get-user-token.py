@@ -9,6 +9,7 @@ All prompts/errors go to stderr.
 Requires: pip install msal
 """
 
+import argparse
 import json
 import os
 import sys
@@ -59,6 +60,18 @@ def _save_cache(cache: msal.SerializableTokenCache):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help=(
+            "Ignore the cached access token and use the refresh token to fetch "
+            "a new one. Use at MCP startup so the launched proxy gets a full "
+            "~60 min of token lifetime instead of whatever remained in cache."
+        ),
+    )
+    args = parser.parse_args()
+
     if not CLIENT_ID:
         print(
             "ERROR: GRAPH_MCP_CLIENT_ID not set.\n"
@@ -78,7 +91,11 @@ def main():
     # Try silent token acquisition first (cached refresh token)
     accounts = app.get_accounts()
     if accounts:
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        result = app.acquire_token_silent(
+            SCOPES,
+            account=accounts[0],
+            force_refresh=args.force_refresh,
+        )
         if result and "access_token" in result:
             _save_cache(cache)
             print(result["access_token"])  # stdout — piped to start-mcp.cmd
