@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { validateConfig, GRAPH_CLIENT_ID } from "./utils/config.js";
 import { log, logError } from "./utils/logger.js";
 import { userTokenStorage, authenticateRequest } from "./utils/auth.js";
-import { GraphClient, isDelegatedAuth } from "./api/client.js";
+import { GraphClient, isDelegatedAuth, getBreakerState, CircuitOpenError } from "./api/client.js";
 import { registerUserTools } from "./tools/users.js";
 import { registerGroupTools } from "./tools/groups.js";
 import { registerLicenseTools } from "./tools/licenses.js";
@@ -150,10 +150,20 @@ async function startHttp(port: number): Promise<void> {
   createMcpServer();
 
   const httpServer = createServer(async (req, res) => {
-    // Health check
+    // Health check — surfaces circuit-breaker state so operators can spot
+    // upstream Graph degradation from outside without tailing logs.
     if (req.method === "GET" && req.url === "/health") {
+      const breakers = getBreakerState();
+      const anyOpen = Object.values(breakers).some((b) => b.state === "open");
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", transport: "streamable-http" }));
+      res.end(
+        JSON.stringify({
+          status: anyOpen ? "degraded" : "ok",
+          transport: "streamable-http",
+          tools: toolHandlers.size,
+          circuit_breakers: breakers,
+        })
+      );
       return;
     }
 
@@ -230,13 +240,39 @@ async function startHttp(port: number): Promise<void> {
       }
 
       // Execute the tool inside the correct auth context
+      const started = Date.now();
       try {
         const result = await userTokenStorage.run(userToken, async () => {
           return await registered.handler(validatedArgs);
         });
+        const duration = Date.now() - started;
+        if (duration > 5_000) {
+          log(`Tool ${toolName} completed in ${duration}ms`);
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {
+        const duration = Date.now() - started;
+        // CircuitOpenError -> return a 503 with a clear transient signal so
+        // callers can back off rather than treating it as a generic 500.
+        if (err instanceof CircuitOpenError) {
+          logError(`Tool ${toolName} short-circuited after ${duration}ms`, err);
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: err.message,
+                transient: true,
+                host: err.host,
+                tool: toolName,
+              }),
+            }],
+            isError: true,
+          }));
+          return;
+        }
+        logError(`Tool ${toolName} failed after ${duration}ms`, err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           content: [{ type: "text", text: `Tool execution error: ${(err as Error).message}` }],
@@ -289,6 +325,38 @@ async function startHttp(port: number): Promise<void> {
     log(`  Health check: http://localhost:${port}/health`);
     log(`  Auth modes: delegated (Bearer token) + app-only (X-API-Key / SP)`);
   });
+
+  // Graceful shutdown — Container Apps sends SIGTERM and waits
+  // terminationGracePeriodSeconds (default 30s) before SIGKILL. We stop
+  // accepting new connections, let in-flight requests drain, then exit.
+  // Without this the process would hard-stop and in-flight tool calls
+  // would surface as 502/connection-reset to callers.
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`Received ${signal} — draining HTTP server (max 25s)`);
+
+    // Hard deadline shorter than terminationGracePeriodSeconds so the
+    // process exits cleanly rather than getting killed mid-drain.
+    const deadline = setTimeout(() => {
+      logError("Drain timeout exceeded — forcing exit");
+      process.exit(1);
+    }, 25_000);
+    deadline.unref();
+
+    httpServer.close((err) => {
+      clearTimeout(deadline);
+      if (err) {
+        logError("Error during HTTP server close", err);
+        process.exit(1);
+      }
+      log("Shutdown complete");
+      process.exit(0);
+    });
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 async function main(): Promise<void> {

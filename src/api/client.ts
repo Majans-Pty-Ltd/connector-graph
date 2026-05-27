@@ -5,9 +5,17 @@ import {
   GRAPH_API_BASE,
 } from "../utils/config.js";
 import { getUserToken } from "../utils/auth.js";
-import { log, logError } from "../utils/logger.js";
+import { log } from "../utils/logger.js";
 import type { ODataResponse } from "./types.js";
 import { Agent, setGlobalDispatcher } from "undici";
+import {
+  httpRequest,
+  CircuitOpenError,
+  DEFAULT_TIMEOUT_MS,
+  SEARCH_TIMEOUT_MS,
+  ATTACHMENT_TIMEOUT_MS,
+  getBreakerState,
+} from "./http-client.js";
 
 // ── Connection pooling ──
 // Configure undici Agent with keep-alive and higher connection limits for Graph API.
@@ -15,13 +23,16 @@ import { Agent, setGlobalDispatcher } from "undici";
 const keepAliveAgent = new Agent({
   keepAliveTimeout: 30_000,       // keep idle connections for 30s
   keepAliveMaxTimeout: 120_000,   // max idle time 2 min
-  connections: 25,                // max connections per origin
+  connections: 100,               // raised from 25 — was a bottleneck under 14 concurrent agents
   pipelining: 1,                  // HTTP/1.1 pipelining (1 = no pipelining, safe default)
 });
 setGlobalDispatcher(keepAliveAgent);
-log("HTTP keep-alive agent configured (25 connections/origin, 30s idle timeout)");
+log("HTTP keep-alive agent configured (100 connections/origin, 30s idle timeout)");
 
-const MAX_RETRIES = 2;
+// ── Pagination cap ──
+// Hard upper bound on getAll() iterations. Surfaced via the response shape
+// so callers can tell when they hit it — silent truncation hides bugs.
+export const PAGINATION_HARD_CAP = 5_000;
 
 interface TokenCache {
   token: string;
@@ -42,12 +53,10 @@ async function getSpToken(): Promise<string> {
     return tokenCache.token;
   }
 
-  // If a refresh is already in progress, piggyback on it
   if (tokenRefreshPromise) {
     return tokenRefreshPromise;
   }
 
-  // Start the refresh and store the promise so concurrent callers share it
   tokenRefreshPromise = (async () => {
     try {
       // Re-check cache after acquiring the "lock" — another caller may have refreshed
@@ -63,14 +72,17 @@ async function getSpToken(): Promise<string> {
         scope: "https://graph.microsoft.com/.default",
       });
 
-      const res = await fetch(
-        `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: body.toString(),
-        }
+      // Token endpoint goes through our retry/breaker layer too — if Entra
+      // is throttling us we should back off rather than retry instantly.
+      const url = new URL(
+        `https://login.microsoftonline.com/${GRAPH_TENANT_ID}/oauth2/v2.0/token`
       );
+      const res = await httpRequest(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        timeoutMs: 30_000,
+      });
 
       if (!res.ok) {
         const text = await res.text();
@@ -110,40 +122,97 @@ export function isDelegatedAuth(): boolean {
   return getUserToken() !== undefined;
 }
 
+/** Re-exported for use in /health and similar diagnostics. */
+export { getBreakerState, CircuitOpenError };
+
+// Heuristic — which path patterns should get the longer search/attachment
+// timeout. Keeps the timeout policy centralised here rather than scattered
+// through tools/*.
+function inferTimeoutMs(url: URL): number {
+  const path = url.pathname.toLowerCase();
+  if (path.endsWith("/$value") || path.includes("/attachments/")) {
+    return ATTACHMENT_TIMEOUT_MS;
+  }
+  if (
+    url.searchParams.has("$search") ||
+    path.includes("/search") ||
+    path.includes("/transcripts/")
+  ) {
+    return SEARCH_TIMEOUT_MS;
+  }
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/** Options accepted by the GraphClient request methods. */
+export interface GraphRequestOptions {
+  /** Override the heuristic per-request timeout. */
+  timeoutMs?: number;
+  /** Caller-supplied AbortSignal — used by tools that wrap progress emitters. */
+  signal?: AbortSignal;
+}
+
 export class GraphClient {
   /** Make an authenticated GET request to the Graph API. */
-  async get<T>(path: string, params?: Record<string, string>): Promise<T> {
+  async get<T>(
+    path: string,
+    params?: Record<string, string>,
+    opts?: GraphRequestOptions
+  ): Promise<T> {
     const url = new URL(path, GRAPH_API_BASE);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== "") url.searchParams.set(k, v);
       }
     }
-    return this.request<T>("GET", url);
+    return this.request<T>("GET", url, undefined, undefined, opts);
   }
 
   /** Make an authenticated PATCH request. Optional extra headers (e.g. If-Match for Planner). */
-  async patch<T>(path: string, body: Record<string, unknown>, extraHeaders?: Record<string, string>): Promise<T> {
+  async patch<T>(
+    path: string,
+    body: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
+    opts?: GraphRequestOptions
+  ): Promise<T> {
     const url = new URL(path, GRAPH_API_BASE);
-    return this.request<T>("PATCH", url, body, extraHeaders);
+    return this.request<T>("PATCH", url, body, extraHeaders, opts);
   }
 
   /** Make an authenticated POST request. */
-  async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  async post<T>(
+    path: string,
+    body: Record<string, unknown>,
+    opts?: GraphRequestOptions
+  ): Promise<T> {
     const url = new URL(path, GRAPH_API_BASE);
-    return this.request<T>("POST", url, body);
+    return this.request<T>("POST", url, body, undefined, opts);
   }
 
   /** Make an authenticated DELETE request. Optional extra headers (e.g. If-Match for Planner). */
-  async delete(path: string, extraHeaders?: Record<string, string>): Promise<void> {
+  async delete(
+    path: string,
+    extraHeaders?: Record<string, string>,
+    opts?: GraphRequestOptions
+  ): Promise<void> {
     const url = new URL(path, GRAPH_API_BASE);
-    await this.request<void>("DELETE", url, undefined, extraHeaders);
+    await this.request<void>("DELETE", url, undefined, extraHeaders, opts);
   }
 
-  /** Fetch all pages of a paginated OData response. */
-  async getAll<T>(path: string, params?: Record<string, string>): Promise<T[]> {
+  /**
+   * Fetch all pages of a paginated OData response.
+   *
+   * Returns the items array. If a `meta` argument is provided, it is mutated
+   * with `{ truncated, pages }` so callers can detect when the
+   * PAGINATION_HARD_CAP was hit — silent truncation is a footgun.
+   */
+  async getAll<T>(
+    path: string,
+    params?: Record<string, string>,
+    meta?: { truncated?: boolean; pages?: number },
+    opts?: GraphRequestOptions
+  ): Promise<T[]> {
     const all: T[] = [];
-    let url = new URL(path, GRAPH_API_BASE);
+    const url = new URL(path, GRAPH_API_BASE);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== "") url.searchParams.set(k, v);
@@ -151,105 +220,93 @@ export class GraphClient {
     }
 
     let nextLink: string | undefined;
+    let pages = 0;
     do {
       const fetchUrl = nextLink ? new URL(nextLink) : url;
-      const result = await this.request<ODataResponse<T>>("GET", fetchUrl);
+      const result = await this.request<ODataResponse<T>>(
+        "GET",
+        fetchUrl,
+        undefined,
+        undefined,
+        opts
+      );
       all.push(...(result.value ?? []));
       nextLink = result["@odata.nextLink"];
-    } while (nextLink && all.length < 5000); // Safety cap
+      pages += 1;
+    } while (nextLink && all.length < PAGINATION_HARD_CAP);
 
+    const truncated = !!nextLink && all.length >= PAGINATION_HARD_CAP;
+    if (meta) {
+      meta.truncated = truncated;
+      meta.pages = pages;
+    }
+    if (truncated) {
+      log(
+        `getAll(${path}) hit PAGINATION_HARD_CAP=${PAGINATION_HARD_CAP} — caller may want to narrow filter`
+      );
+    }
     return all;
   }
 
   /** Make an authenticated GET request that returns plain text (not JSON). */
-  async getText(path: string, params?: Record<string, string>): Promise<string> {
+  async getText(
+    path: string,
+    params?: Record<string, string>,
+    opts?: GraphRequestOptions
+  ): Promise<string> {
     const url = new URL(path, GRAPH_API_BASE);
     if (params) {
       for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== "") url.searchParams.set(k, v);
       }
     }
-    return this.requestText("GET", url);
-  }
-
-  private async requestText(method: string, url: URL): Promise<string> {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const token = await getToken();
-      log(`${method} ${url.pathname}${url.search} (text)`);
-      const res = await fetch(url.toString(), {
-        method,
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get("Retry-After") ?? "10", 10);
-        logError(`Rate limited, waiting ${retryAfter}s`);
-        await new Promise((r) => setTimeout(r, retryAfter * 1000));
-        continue;
-      }
-      if (res.status >= 500 && attempt < MAX_RETRIES) {
-        logError(`Server error ${res.status}, retrying in 1s`);
-        await new Promise((r) => setTimeout(r, 1000));
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Graph API error ${res.status}: ${text}`);
-      }
-      return await res.text();
+    const token = await getToken();
+    const res = await httpRequest(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      timeoutMs: opts?.timeoutMs ?? inferTimeoutMs(url),
+      externalSignal: opts?.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Graph API error ${res.status}: ${text}`);
     }
-    throw new Error("Max retries exceeded");
+    return res.text();
   }
 
   private async request<T>(
     method: string,
     url: URL,
     body?: Record<string, unknown>,
-    extraHeaders?: Record<string, string>
+    extraHeaders?: Record<string, string>,
+    opts?: GraphRequestOptions
   ): Promise<T> {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const token = await getToken();
+    const token = await getToken();
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...extraHeaders,
+    };
 
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        ...extraHeaders,
-      };
-      const init: RequestInit = { method, headers };
+    const res = await httpRequest(url, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      timeoutMs: opts?.timeoutMs ?? inferTimeoutMs(url),
+      externalSignal: opts?.signal,
+    });
 
-      if (body) {
-        init.body = JSON.stringify(body);
-      }
-
-      log(`${method} ${url.pathname}${url.search}`);
-      const res = await fetch(url.toString(), init);
-
-      if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get("Retry-After") ?? "10", 10);
-        logError(`Rate limited, waiting ${retryAfter}s`);
-        await new Promise((r) => setTimeout(r, retryAfter * 1000));
-        continue;
-      }
-
-      if (res.status >= 500 && attempt < MAX_RETRIES) {
-        logError(`Server error ${res.status}, retrying in 1s`);
-        await new Promise((r) => setTimeout(r, 1000));
-        continue;
-      }
-
-      // 202 Accepted (sendMail) or 204 No Content (DELETE)
-      if (res.status === 202 || res.status === 204) {
-        return undefined as T;
-      }
-
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Graph API error ${res.status}: ${text}`);
-      }
-
-      return (await res.json()) as T;
+    // 202 Accepted (sendMail) or 204 No Content (DELETE)
+    if (res.status === 202 || res.status === 204) {
+      return undefined as T;
     }
 
-    throw new Error("Max retries exceeded");
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Graph API error ${res.status}: ${text}`);
+    }
+
+    return (await res.json()) as T;
   }
 }
+
