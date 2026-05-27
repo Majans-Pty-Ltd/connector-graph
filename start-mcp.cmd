@@ -18,8 +18,9 @@ REM   - GRAPH_MCP_CLIENT_ID env var set to the Graph-MCP-User Entra app client I
 
 set SCRIPT_DIR=%~dp0
 
-REM Get fresh token (stderr shows device-code prompt if needed)
-for /f "usebackq delims=" %%t in (`python "%SCRIPT_DIR%get-user-token.py"`) do set GRAPH_TOKEN=%%t
+REM Get fresh token (--force-refresh ensures full ~60 min lifetime, not a stale
+REM cached token that's about to expire mid-session)
+for /f "usebackq delims=" %%t in (`python "%SCRIPT_DIR%get-user-token.py" --force-refresh`) do set GRAPH_TOKEN=%%t
 
 if "%GRAPH_TOKEN%"=="" (
     echo ERROR: Failed to acquire Graph token. >&2
