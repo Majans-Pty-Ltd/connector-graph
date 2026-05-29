@@ -130,7 +130,16 @@ export { getBreakerState, CircuitOpenError };
 // through tools/*.
 function inferTimeoutMs(url: URL): number {
   const path = url.pathname.toLowerCase();
-  if (path.endsWith("/$value") || path.includes("/attachments/")) {
+  // Attachment DOWNLOAD (.../attachments/{id}, /$value) AND attachment WRITE
+  // (POST .../messages/{id}/attachments — no trailing slash) both need the
+  // longer budget: Exchange scans Office attachments synchronously and can
+  // take well over the 60s default. The trailing-slash-only check missed the
+  // write path, so attachment creation silently ran on the 60s timeout.
+  if (
+    path.endsWith("/$value") ||
+    path.includes("/attachments/") ||
+    path.endsWith("/attachments")
+  ) {
     return ATTACHMENT_TIMEOUT_MS;
   }
   if (
