@@ -218,6 +218,15 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
 
         const graphMentions = toGraphMentions(mentions);
 
+        // Map to Graph fileAttachment shape once. Reused for inline attach on
+        // new drafts and the per-item POST loop on the reply path.
+        const graphAttachments = attachments?.map(a => ({
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: a.name,
+          contentBytes: a.contentBytes,
+          ...(a.contentType ? { contentType: a.contentType } : {}),
+        }));
+
         let result: { id: string; subject: string; webLink?: string };
 
         if (reply_to_message_id) {
@@ -251,6 +260,11 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
             ...(ccRecipients ? { ccRecipients } : {}),
             ...(importance ? { importance } : {}),
             ...(graphMentions ? { mentions: graphMentions } : {}),
+            // Attach inline on creation so body + attachments commit in ONE
+            // atomic POST. The previous create-then-POST-each-attachment flow
+            // left a body-only draft whenever the follow-up attachment POST
+            // stalled or failed — Graph accepts fileAttachments inline here.
+            ...(graphAttachments && graphAttachments.length > 0 ? { attachments: graphAttachments } : {}),
           };
 
           result = await client.post<{ id: string; subject: string; webLink?: string }>(
@@ -259,17 +273,14 @@ export function registerMailTools(server: McpServer, client: GraphClient): void 
           );
         }
 
-        // Add attachments to the draft if any
-        if (attachments && attachments.length > 0) {
-          for (const a of attachments) {
+        // Reply drafts are materialised via createReplyAll, which does NOT accept
+        // inline attachments — so add them with a follow-up POST per attachment.
+        // New drafts already attached inline in the create POST above.
+        if (reply_to_message_id && graphAttachments && graphAttachments.length > 0) {
+          for (const a of graphAttachments) {
             await client.post<unknown>(
               `users/${encodeURIComponent(sender)}/messages/${encodeURIComponent(result.id)}/attachments`,
-              {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                name: a.name,
-                contentBytes: a.contentBytes,
-                ...(a.contentType ? { contentType: a.contentType } : {}),
-              }
+              a
             );
           }
         }
