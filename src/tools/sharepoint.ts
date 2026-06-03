@@ -179,14 +179,22 @@ export function registerSharePointTools(server: McpServer, client: GraphClient):
           ? `sites/${encodeURIComponent(site_id)}/drives/${encodeURIComponent(drive_id)}`
           : `sites/${encodeURIComponent(site_id)}/drive`;
 
-        const result = await client.get<GraphDriveItem>(
-          `${drivePart}/root:${path}`,
-          {
-            $select: "id,name,size,lastModifiedDateTime,webUrl,file,@microsoft.graph.downloadUrl",
-          }
-        );
+        // @microsoft.graph.downloadUrl is only returned in the DEFAULT projection — Graph
+        // silently omits it whenever $select is present. So request without $select and
+        // project the useful fields (incl. the pre-authenticated download URL) ourselves.
+        const result = await client.get<GraphDriveItem>(`${drivePart}/root:${path}`);
+        const r = result as unknown as Record<string, unknown>;
+        const out = {
+          id: r.id,
+          name: r.name,
+          size: r.size,
+          lastModifiedDateTime: r.lastModifiedDateTime,
+          webUrl: r.webUrl,
+          file: r.file,
+          downloadUrl: r["@microsoft.graph.downloadUrl"] ?? null,
+        };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }],
         };
       } catch (err) {
         return {

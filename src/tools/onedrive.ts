@@ -60,14 +60,23 @@ export function registerOneDriveTools(server: McpServer, client: GraphClient): v
     },
     async ({ user_id, path }) => {
       try {
+        // @microsoft.graph.downloadUrl is only returned in the DEFAULT projection — Graph
+        // omits it whenever $select is present. Request without $select, project ourselves.
         const result = await client.get<GraphDriveItem>(
-          `users/${encodeURIComponent(user_id)}/drive/root:${path}`,
-          {
-            $select: "id,name,size,lastModifiedDateTime,webUrl,file,@microsoft.graph.downloadUrl",
-          }
+          `users/${encodeURIComponent(user_id)}/drive/root:${path}`
         );
+        const r = result as unknown as Record<string, unknown>;
+        const out = {
+          id: r.id,
+          name: r.name,
+          size: r.size,
+          lastModifiedDateTime: r.lastModifiedDateTime,
+          webUrl: r.webUrl,
+          file: r.file,
+          downloadUrl: r["@microsoft.graph.downloadUrl"] ?? null,
+        };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify(out, null, 2) }],
         };
       } catch (err) {
         return {
