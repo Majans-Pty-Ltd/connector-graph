@@ -1,6 +1,6 @@
 # connector-graph
 
-MCP server exposing 44 Microsoft Graph API tools for user management, groups, licenses, mail, OneDrive, calendar, meeting transcripts, SharePoint, Planner, To Do, and Teams Chat.
+MCP server exposing 56 Microsoft Graph API tools for user management, groups, licenses, mail, OneDrive, calendar, meeting transcripts, SharePoint, Planner, To Do, and Teams Chat.
 
 ## Tech Stack
 
@@ -26,14 +26,15 @@ src/
 ├── index.ts              # MCP server entry point + graph_auth_status tool + dual transport (stdio/HTTP) + dual auth (delegated/SP)
 ├── api/
 │   ├── client.ts         # GraphClient — dual auth (user token → SP fallback), token cache, 429 retry, OData pagination, getText, If-Match
+│   ├── http-client.ts    # fetch wrapper — per-request timeout, backoff retry (honors Retry-After), per-host circuit breaker
 │   └── types.ts          # All TypeScript interfaces
 ├── tools/
 │   ├── users.ts          # graph_list_users, graph_get_user, graph_update_user
 │   ├── groups.ts         # graph_list_groups, graph_get_group_members, graph_add_group_member, graph_remove_group_member
 │   ├── licenses.ts       # graph_list_subscribed_skus, graph_list_user_licenses
-│   ├── mail.ts           # graph_send_mail, graph_search_mail, graph_read_mail, graph_list_attachments, graph_get_attachment, graph_read_attachment
+│   ├── mail.ts           # graph_search_mail, graph_send_mail, graph_create_draft, graph_read_mail, graph_list_attachments, graph_get_attachment, graph_read_attachment, graph_list_mail_folders, graph_list_child_folders, graph_list_folder_messages, graph_reply_mail, graph_move_mail, graph_delete_mail, graph_update_mail
 │   ├── onedrive.ts       # graph_list_drive_items, graph_get_drive_item_content
-│   ├── calendar.ts       # graph_list_events, graph_get_online_meeting, graph_list_meeting_transcripts, graph_get_meeting_transcript_content
+│   ├── calendar.ts       # graph_list_events, graph_get_online_meeting, graph_list_meeting_transcripts, graph_get_meeting_transcript_content, graph_create_event, graph_update_event, graph_delete_event, graph_get_schedule
 │   ├── sharepoint.ts     # graph_list_sites, graph_get_site, graph_list_site_drives, graph_list_site_drive_items, graph_get_site_file_content, graph_search_site_files
 │   ├── planner.ts        # graph_list_plans, graph_get_plan, graph_list_buckets, graph_list_plan_tasks, graph_get_task, graph_create_task, graph_update_task, graph_delete_task
 │   ├── todo.ts           # graph_list_todo_lists, graph_list_todo_tasks, graph_create_todo_task, graph_update_todo_task, graph_complete_todo_task
@@ -41,9 +42,10 @@ src/
 ├── types/
 │   └── mammoth.d.ts      # Type declarations for mammoth (no bundled types)
 ├── utils/
-│   ├── auth.ts           # AsyncLocalStorage for per-request user tokens (delegated auth context)
+│   ├── auth.ts           # authenticateRequest (auth precedence) + AsyncLocalStorage for per-request user tokens
 │   ├── config.ts         # GRAPH_TENANT_ID, CLIENT_ID, CLIENT_SECRET, API_KEY validation
 │   ├── content-extractor.ts  # Attachment content extraction (PDF, Word, Excel, HTML, CSV, EML, images)
+│   ├── jwt-validator.ts  # MI JWT signature check (JWKS) + vault Bearer claim validation
 │   └── logger.ts         # Stderr logger
 get-user-token.py          # MSAL device-code flow — acquires delegated Graph token for users
 start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote for Claude Code
@@ -52,7 +54,7 @@ start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote
     └── deploy.yml        # CI/CD -> ACR -> Container Apps
 ```
 
-## MCP Tools (44 total)
+## MCP Tools (56 total)
 
 ### Auth (1)
 | Tool | Description |
@@ -80,12 +82,20 @@ start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote
 | `graph_list_subscribed_skus` | License inventory (consumed/prepaid/available) |
 | `graph_list_user_licenses` | Licenses assigned to a specific user |
 
-### Mail (6)
+### Mail (14)
 | Tool | Description |
 |------|-------------|
 | `graph_send_mail` | Send email from a user's mailbox (HTML/text, to/cc, importance) |
 | `graph_search_mail` | Search mailbox with $search/$filter |
 | `graph_read_mail` | Get full email content by message ID |
+| `graph_create_draft` | Create a draft (saved, not sent) with optional file attachments; `reply_to_message_id` makes it an in-thread reply draft |
+| `graph_reply_mail` | Reply in-thread, preserving the conversation; optional attachments (each ≤3MB) |
+| `graph_list_mail_folders` | List mail folders with IDs and unread/total counts |
+| `graph_list_child_folders` | List subfolders of a mail folder |
+| `graph_list_folder_messages` | List messages in a folder (well-known name or folder ID; $filter/$search) |
+| `graph_move_mail` | Move an email to another folder |
+| `graph_delete_mail` | Delete an email (Deleted Items by default; `permanently=true` hard-deletes) |
+| `graph_update_mail` | Mark read/unread, flag, set importance, assign categories |
 | `graph_list_attachments` | List attachments on an email |
 | `graph_get_attachment` | Download attachment content (decoded text or base64 binary) |
 | `graph_read_attachment` | Download attachment and extract readable text (PDF, Word, Excel, HTML, CSV, EML, images, plain text) |
@@ -96,10 +106,14 @@ start-mcp.cmd              # Wrapper script — gets token + launches mcp-remote
 | `graph_list_drive_items` | List OneDrive files/folders at a path |
 | `graph_get_drive_item_content` | Get file metadata and download URL |
 
-### Calendar & Meetings (4)
+### Calendar & Meetings (8)
 | Tool | Description |
 |------|-------------|
 | `graph_list_events` | Calendar events in a date range with attendees and online meeting info |
+| `graph_create_event` | Create a calendar event (attendees, online Teams meeting, recurrence) |
+| `graph_update_event` | Update an event — only provided fields change |
+| `graph_delete_event` | Delete an event (sends cancellation notices to attendees) |
+| `graph_get_schedule` | Free/busy availability for one or more users in a time range |
 | `graph_get_online_meeting` | Get online meeting details by join URL (needed for transcript retrieval) |
 | `graph_list_meeting_transcripts` | List available transcripts for an online meeting |
 | `graph_get_meeting_transcript_content` | Get full meeting transcript text (VTT format with speakers and timestamps) |
@@ -289,7 +303,9 @@ docker run -p 8030:8030 \
 
 **DNS note**: Custom domain requires CNAMEs in both cPanel (public DNS) and MJS-AZURE-DC01 (corporate AD DNS). See workspace `CLAUDE.md` > "Custom Domain DNS" for commands.
 
-### GitHub Org Secrets Required
+### GitHub Repo Secrets Required
+
+Set on this repo (GitHub secrets are repo-level, not org-level):
 
 | Secret | Source |
 |--------|--------|
